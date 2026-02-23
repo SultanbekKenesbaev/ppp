@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="pagehead chats-head">
+  <h1>Чаты</h1>
+</div>
+
+<form class="chat-filters" method="get">
+  <div class="chat-filter-field">
+    <label for="districtSelect">Район</label>
+    <select id="districtSelect" name="district_id">
+      <option value="">Все районы</option>
+      {% for d in districts %}
+        <option value="{{ d.id }}" {{ 'selected' if district_id==d.id else '' }}>{{ d.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="chat-filter-field">
+    <label for="mahallaSelect">Махалля</label>
+    <select id="mahallaSelect" name="mahalla_id">
+      <option value="">Все махалли</option>
+      {% for m in mahallas %}
+        <option value="{{ m.id }}" {{ 'selected' if mahalla_id==m.id else '' }}>{{ m.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="chat-filter-actions">
+    <button class="btn primary smallbtn" type="submit">Применить</button>
+    {% if district_id or mahalla_id %}
+      <a class="btn smallbtn" href="{{ url_for('manager.chats') }}">Сброс</a>
+    {% endif %}
+  </div>
+</form>
+
+<div class="list">
+  {% for it in items %}
+    <a class="chatrow" href="{{ url_for('manager.chat', conversation_id=it.conv.id) }}">
+      <div class="chatrow-main row gap">
+        <div class="avatar avatar-sm">
+          {% if it.worker.photo_path %}
+            <img src="{{ url_for('auth.avatar_get', user_id=it.worker.id) }}" alt="avatar">
+          {% else %}
+            <div class="avatar-fallback">
+              {{ (it.worker.first_name[:1] ~ it.worker.last_name[:1]).upper() }}
+            </div>
+          {% endif %}
+        </div>
+        <div>
+          <div class="strong">{{ it.worker.full_name }}</div>
+        <div class="muted small">{{ it.district }} · {{ it.mahalla }} · {{ it.street }}</div>
+        <div class="small">
+          {% if it.last_msg %}
+            {{ ("[Задача] " if it.last_msg.type=="task" else "") ~ (it.last_msg.title if it.last_msg.type=="task" else it.last_msg.body) }}
+          {% else %}
+            <span class="muted">Нет сообщений</span>
+          {% endif %}
+        </div>
+        </div>
+      </div>
+      <div class="chatrow-right">
+        {% if it.last_msg %}
+          <div class="muted small">{{ it.last_msg.sent_at|uztime('%H:%M') }}</div>
+        {% endif %}
+        {% if it.unread > 0 %}
+          <div class="badge">{{ it.unread }}</div>
+        {% endif %}
+      </div>
+    </a>
+  {% else %}
+    <div class="muted">Чатов пока нет</div>
+  {% endfor %}
+</div>
+{% endblock %}

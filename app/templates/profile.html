@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="pagehead">
+  <h1>Профиль</h1>
+</div>
+
+<div class="card">
+  <form method="post" action="{{ url_for('auth.profile_update') }}" enctype="multipart/form-data" class="stack">
+    <div class="row gap">
+      <div class="avatar avatar-lg">
+        {% if current_user.photo_path %}
+          <img src="{{ url_for('auth.avatar_get', user_id=current_user.id) }}" alt="avatar">
+        {% else %}
+          <div class="avatar-fallback">
+            {{ (current_user.first_name[:1] ~ current_user.last_name[:1]).upper() }}
+          </div>
+        {% endif %}
+      </div>
+      <div class="stack">
+        <label class="muted small">Аватар</label>
+        <input type="file" name="avatar" accept="image/*">
+        <div class="muted small">JPEG/PNG. Логин менять нельзя.</div>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <input name="last_name" value="{{ current_user.last_name }}" placeholder="Фамилия" required>
+      <input name="first_name" value="{{ current_user.first_name }}" placeholder="Имя" required>
+    </div>
+    <input name="middle_name" value="{{ current_user.middle_name }}" placeholder="Отчество">
+
+    <div class="row">
+      <button class="btn primary" type="submit">Сохранить</button>
+      <a class="btn danger" href="{{ url_for('auth.logout') }}">Выйти</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

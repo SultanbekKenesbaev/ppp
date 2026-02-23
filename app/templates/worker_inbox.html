@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="pagehead">
+  <h1>Входящие</h1>
+</div>
+
+{% if not conv %}
+  <div class="card">
+    <div class="muted">Пока нет задач. Руководитель ещё не отправлял сообщения.</div>
+  </div>
+{% else %}
+  <div class="grid-2">
+    <div class="card">
+      <h2>Новые</h2>
+      <div class="list">
+        {% for t in tasks_new %}
+          <a class="item link" href="{{ url_for('worker.chat') }}">
+            <div class="strong">{{ t.title }}</div>
+            <div class="muted small">{{ t.sent_at|uztime('%Y-%m-%d %H:%M') }}</div>
+          </a>
+        {% else %}
+          <div class="muted">Нет новых задач</div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Просмотренные</h2>
+      <div class="list">
+        {% for t in tasks_seen %}
+          <a class="item link" href="{{ url_for('worker.chat') }}">
+            <div class="strong">{{ t.title }}</div>
+            <div class="muted small">{{ t.sent_at|uztime('%Y-%m-%d %H:%M') }}</div>
+          </a>
+        {% else %}
+          <div class="muted">Пока пусто</div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+{% endif %}
+{% endblock %}

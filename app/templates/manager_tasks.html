@@ -1,0 +1,282 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="pagehead row-between">
+  <h1>Задачи</h1>
+  <button class="btn primary" onclick="toggleCompose(true)">Создать задачу</button>
+</div>
+
+<div class="card" id="composeCard" style="display:none;">
+  <h2>Новая задача</h2>
+
+  <form id="taskForm" method="post" action="{{ url_for('manager.send_task') }}"
+        enctype="multipart/form-data" class="stack">
+
+    <input name="title" placeholder="Название" required>
+    <textarea name="body" placeholder="Текст" rows="4"></textarea>
+
+<div class="task-mode">
+  <label class="seg">
+    <input type="radio" name="mode" value="all" checked>
+    <span>Всем</span>
+  </label>
+  <label class="seg">
+    <input type="radio" name="mode" value="districts">
+    <span>По районам</span>
+  </label>
+</div>
+
+
+    <div id="districtBox" class="hidden">
+      <input id="districtSearch" placeholder="Поиск района..." autocomplete="off">
+      <div id="districtsList" class="list picklist"></div>
+
+    </div>
+
+    <div class="row-between">
+      <div class="muted small">Получателей: <b id="rcptCount">0</b></div>
+      <div class="muted small" id="rcptHint"></div>
+    </div>
+
+<div class="filepick">
+  <div class="filepick-head">
+    <div class="strong">Вложения (до 10)</div>
+    <div id="taskFilesHint" class="muted small">Файлы не выбраны</div>
+  </div>
+
+  <label class="filepick-btn">
+    <input id="taskFiles" type="file" name="attachments" multiple>
+    <span>📎 Выбрать файлы</span>
+  </label>
+
+  <div id="pickedTaskList" class="picked"></div>
+</div>
+
+
+    <div class="row">
+      <button id="taskSubmit" class="btn primary" type="submit">Отправить</button>
+      <button class="btn" type="button" onclick="toggleCompose(false)">Закрыть</button>
+    </div>
+  </form>
+</div>
+
+<div class="list">
+  {% for x in batches %}
+    {% set b = x.batch %}
+    <div class="card taskcard">
+      <div class="row-between">
+        <div>
+          <div class="strong">{{ b.title }}</div>
+          <div class="muted small">{{ b.created_at|uztime('%Y-%m-%d %H:%M') }}</div>
+        </div>
+        <div class="stat">
+          <div class="pct {{ 'pct-green' if x.percent == 100 else ('pct-red' if x.percent < 10 else 'pct-mid') }}">
+            {{ x.percent }}%
+          </div>
+          <div class="muted small">{{ x.read }}/{{ x.total }}</div>
+        </div>
+      </div>
+
+      <div class="row">
+        <button class="btn" onclick="openTaskDetails('{{ b.id }}')">Детали</button>
+      </div>
+    </div>
+  {% else %}
+    <div class="muted">Задач пока нет</div>
+  {% endfor %}
+</div>
+
+<script>
+  const composeCard = document.getElementById('composeCard');
+  const districtBox = document.getElementById('districtBox');
+  const rcptCountEl = document.getElementById('rcptCount');
+  const rcptHintEl  = document.getElementById('rcptHint');
+  const submitBtn   = document.getElementById('taskSubmit');
+  const form        = document.getElementById('taskForm');
+
+  const TOTAL_ALL = {{ total_all|int }};
+  const DISTRICTS = {{ districts_json|safe }}; // [{id,name,count}]
+
+  function toggleCompose(v){
+    composeCard.style.display = v ? 'block' : 'none';
+    if (v){
+      renderDistricts(DISTRICTS);
+      updateRecipients();
+    }
+  }
+
+  // mode change
+  document.querySelectorAll('input[name="mode"]').forEach(r=>{
+    r.addEventListener('change', ()=>{
+      const mode = document.querySelector('input[name="mode"]:checked')?.value || "all";
+      if (mode === 'districts'){
+        districtBox.classList.remove('hidden');
+      } else {
+        districtBox.classList.add('hidden');
+        // очистим выбор районов
+        document.querySelectorAll('input[name="district_ids"]').forEach(x => x.checked = false);
+      }
+      updateRecipients();
+    });
+  });
+
+  // render districts
+  function renderDistricts(arr){
+    const box = document.getElementById('districtsList');
+    box.innerHTML = '';
+    arr.forEach(d=>{
+      const row = document.createElement('label');
+row.className = 'pickrow district-row';
+row.innerHTML = `
+  <span class="pick-left">
+    <input class="tg-check" type="checkbox" name="district_ids" value="${d.id}">
+  </span>
+
+  <span class="pickname">${escapeHtml(d.name)}</span>
+
+  <span class="pick-right muted small">${d.count} чел.</span>
+`;
+
+      box.appendChild(row);
+    });
+
+    // слушаем чекбоксы после отрисовки
+    box.querySelectorAll('input[name="district_ids"]').forEach(cb=>{
+      cb.addEventListener('change', updateRecipients);
+    });
+  }
+
+  // search filter
+  document.getElementById('districtSearch')?.addEventListener('input', ()=>{
+    const q = (document.getElementById('districtSearch').value || '').toLowerCase().trim();
+    const filtered = DISTRICTS.filter(d => d.name.toLowerCase().includes(q));
+    renderDistricts(filtered);
+    updateRecipients(); // чтобы счётчик не ломался при перерисовке
+  });
+
+  function selectedDistrictIds(){
+    return Array.from(document.querySelectorAll('input[name="district_ids"]:checked'))
+      .map(x => parseInt(x.value, 10))
+      .filter(n => Number.isFinite(n));
+  }
+
+  function updateRecipients(){
+    const mode = document.querySelector('input[name="mode"]:checked')?.value || "all";
+
+    let n = 0;
+    if (mode === "all"){
+      n = TOTAL_ALL;
+      rcptHintEl.textContent = '';
+    } else {
+      const ids = selectedDistrictIds();
+      const byId = new Map(DISTRICTS.map(d => [d.id, d.count]));
+      n = ids.reduce((sum, id) => sum + (byId.get(id) || 0), 0);
+
+      rcptHintEl.textContent = ids.length ? '' : 'Выберите районы';
+    }
+
+    rcptCountEl.textContent = String(n);
+
+    // блокируем отправку, если recipients = 0
+    if (n <= 0){
+      submitBtn.disabled = true;
+      submitBtn.classList.add('disabled');
+    } else {
+      submitBtn.disabled = false;
+      submitBtn.classList.remove('disabled');
+    }
+  }
+
+  // forbid empty send
+  form.addEventListener('submit', (e)=>{
+    const mode = document.querySelector('input[name="mode"]:checked')?.value || "all";
+    if (mode === "districts" && selectedDistrictIds().length === 0){
+      e.preventDefault();
+      alert("Выберите хотя бы один район");
+      return;
+    }
+  });
+
+  // attachments picker (append files like TG)
+  function setupTaskFilePicker(){
+    if (typeof initTgFilePicker !== 'function') return;
+    initTgFilePicker('taskFiles', 'pickedTaskList', (count) => {
+      const hint = document.getElementById('taskFilesHint');
+      if (hint) hint.textContent = count ? `Выбрано: ${count}` : 'Файлы не выбраны';
+    });
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', setupTaskFilePicker, { once: true });
+  } else {
+    setupTaskFilePicker();
+  }
+
+  // initial recipients count
+  updateRecipients();
+
+  function openTaskDetails(batchId){
+    fetch(`/manager/tasks/details/${batchId}`)
+      .then(r=>r.json())
+      .then(data=>{
+        const tree = data.tree;
+        let html = `<div class="muted small">Задача: <b>${escapeHtml(data.batch.title)}</b></div>`;
+        html += renderTree(tree);
+        openModal("Аналитика", html);
+      });
+  }
+
+  function renderTree(tree){
+    let html = '';
+    for (const d in tree){
+      const D = tree[d];
+      html += `<div class="tree-node">
+        <div class="tree-title">
+          <span class="strong">${escapeHtml(d)}</span>
+          <span class="muted small">${pct(D._read, D._total)}%</span>
+        </div>
+      `;
+      const mah = D.mahallas || {};
+      for (const m in mah){
+        const M = mah[m];
+        html += `<div class="tree-child">
+          <div class="tree-title">
+            <span>${escapeHtml(m)}</span>
+            <span class="muted small">${pct(M._read, M._total)}%</span>
+          </div>
+        `;
+        const st = M.streets || {};
+        for (const s in st){
+          const S = st[s];
+          html += `<div class="tree-child">
+            <div class="tree-title">
+              <span>${escapeHtml(s)}</span>
+              <span class="muted small">${pct(S._read, S._total)}%</span>
+            </div>
+            <div class="tree-workers">
+              ${(S.workers || []).map(w => `<div class="worker-row">
+                <span>${escapeHtml(w.worker_name)}</span>
+                <span class="${w.read ? 'ok' : 'muted'} small">${w.read ? 'Прочитано' : 'Не прочитано'}</span>
+              </div>`).join('')}
+            </div>
+          </div>`;
+        }
+        html += `</div>`;
+      }
+      html += `</div>`;
+    }
+    return html || '<div class="muted">Нет данных</div>';
+  }
+
+  function pct(a,b){
+    if (!b) return 0;
+    return Math.round((a/b)*100);
+  }
+
+  function escapeHtml(str){
+    return (str || '').replace(/[&<>"']/g, (m) => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[m]));
+  }
+
+</script>
+
+{% endblock %}

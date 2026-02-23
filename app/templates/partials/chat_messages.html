@@ -1,0 +1,94 @@
+{% set ns = namespace(last_day=None) %}
+{% for m in messages|sort(attribute='sent_at') %}
+
+  {% set day = m.sent_at|uztime('%Y-%m-%d') %}
+  {% if day != ns.last_day %}
+    <div class="tg-day"><span>{{ m.sent_at|uztime('%d.%m.%Y') }}</span></div>
+    {% set ns.last_day = day %}
+  {% endif %}
+
+  {% set is_me = (m.sender_id == me.id) %}
+  <div class="tg-row {{ 'me' if is_me else 'other' }}">
+    <div class="tg-bubble">
+
+      {# TEXT / TASK #}
+      {% set has_text = (m.type == 'task') or (m.body and (m.body|trim)|length > 0) %}
+      {% if has_text %}
+        {% if m.type == "task" %}
+          <div class="tg-task-title">{{ m.title }}</div>
+          <div class="tg-text">{{ m.body|linkify }}</div>
+        {% else %}
+          <div class="tg-text">{{ m.body|linkify }}</div>
+        {% endif %}
+      {% endif %}
+
+      {# ATTACHMENTS: split into images / others #}
+      {% if m.attachments and m.attachments|length > 0 %}
+
+        {# 1) Images grid (album) #}
+        {% set imgs = m.attachments|selectattr('kind','equalto','image')|list %}
+        {% if imgs|length > 0 %}
+          {% set n = imgs|length %}
+{% set max_show = 4 if n == 4 else (5 if n > 4 else n) %}
+{% set show = imgs[:max_show] %}
+{% set extra = n - max_show %}
+
+<div class="tg-album
+            {% if n == 1 %}one
+            {% elif n == 2 %}two
+            {% elif n == 3 %}three
+            {% elif n == 4 %}four
+            {% else %}many{% endif %}">
+  {% for a in show %}
+    {% set is_last = loop.last and extra > 0 %}
+    <a class="tg-photo {% if is_last %}has-more{% endif %}"
+       href="{{ url_for('auth.file_get', attachment_id=a.id) }}" target="_blank"
+       {% if is_last %}data-more="+{{ extra }}"{% endif %}>
+      <img src="{{ url_for('auth.file_get', attachment_id=a.id) }}" alt="">
+    </a>
+  {% endfor %}
+</div>
+
+        {% endif %}
+
+        {# 2) Videos #}
+        {% set vids = m.attachments|selectattr('kind','equalto','video')|list %}
+        {% if vids|length > 0 %}
+          <div class="tg-atts">
+            {% for a in vids %}
+              <video class="tg-video" controls src="{{ url_for('auth.file_get', attachment_id=a.id) }}"></video>
+            {% endfor %}
+          </div>
+        {% endif %}
+
+        {# 3) Files (non-image non-video) #}
+        {% set files = m.attachments|rejectattr('kind','equalto','image')|rejectattr('kind','equalto','video')|list %}
+        {% if files|length > 0 %}
+          <div class="tg-atts">
+            {% for a in files %}
+              <div class="tg-file">
+                <div class="tg-file-ic">
+                  {{ a.original_name.split('.')[-1]|upper if '.' in a.original_name else 'FILE' }}
+                </div>
+                <div class="tg-file-meta">
+                  <div class="tg-file-name">{{ a.original_name }}</div>
+                  <div class="muted small">{{ (a.size/1024)|round(1) }} KB</div>
+                </div>
+                <a class="btn smallbtn"
+                   href="{{ url_for('auth.file_get', attachment_id=a.id) }}"
+                   download="{{ a.original_name }}">
+                  Скачать
+                </a>
+              </div>
+            {% endfor %}
+          </div>
+        {% endif %}
+
+      {% endif %}
+
+      <div class="tg-time muted small">{{ m.sent_at|uztime('%H:%M') }}</div>
+    </div>
+  </div>
+
+{% endfor %}
+<div id="bottomAnchor"></div>

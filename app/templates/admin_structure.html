@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="pagehead">
+  <h1>Структура</h1>
+</div>
+
+<div class="grid-3">
+
+  <!-- Районы -->
+  <div class="card">
+    <h2>Районы</h2>
+
+    <form method="post" action="{{ url_for('admin.district_create') }}" class="row">
+      <input name="name" placeholder="Название района" required>
+      <button class="btn primary" type="submit">Добавить</button>
+    </form>
+
+    <div class="list compact">
+      {% for d in districts %}
+        <div class="row-between itemline">
+          <div class="title">{{ d.name }}</div>
+          <button class="btn smallbtn" type="button" onclick="toggleEdit('district-{{ d.id }}')">Изменить</button>
+        </div>
+
+        <div id="district-{{ d.id }}" class="editbox hidden">
+          <form method="post" action="{{ url_for('admin.district_update', district_id=d.id) }}" class="row">
+            <input name="name" value="{{ d.name }}" required>
+            <button class="btn" type="submit">Сохранить</button>
+          </form>
+
+          <form method="post" action="{{ url_for('admin.district_delete', district_id=d.id) }}" class="row-between dangerline">
+            <div class="muted small">Удаление возможно только если нет махаллей.</div>
+            <button class="btn danger" type="submit" onclick="return confirm('Удалить район?')">Удалить</button>
+          </form>
+        </div>
+      {% else %}
+        <div class="muted">Пока пусто</div>
+      {% endfor %}
+    </div>
+  </div>
+
+
+  <!-- Махалли -->
+  <div class="card">
+    <h2>Махалли</h2>
+
+    <form method="post" action="{{ url_for('admin.mahalla_create') }}" class="stack">
+      <select name="district_id" required>
+        <option value="">Выберите район</option>
+        {% for d in districts %}
+          <option value="{{ d.id }}">{{ d.name }}</option>
+        {% endfor %}
+      </select>
+      <input name="name" placeholder="Название махалли" required>
+      <button class="btn primary" type="submit">Добавить</button>
+    </form>
+
+    <div class="list compact">
+      {% for m in mahallas %}
+        <div class="row-between itemline">
+          <div class="title">
+            {{ m.name }}
+            <span class="muted small">· {{ m.district.name }}</span>
+          </div>
+          <button class="btn smallbtn" type="button" onclick="toggleEdit('mahalla-{{ m.id }}')">Изменить</button>
+        </div>
+
+        <div id="mahalla-{{ m.id }}" class="editbox hidden">
+          <form method="post" action="{{ url_for('admin.mahalla_update', mahalla_id=m.id) }}" class="stack">
+            <select name="district_id" required>
+              {% for d in districts %}
+                <option value="{{ d.id }}" {{ 'selected' if d.id==m.district_id else '' }}>{{ d.name }}</option>
+              {% endfor %}
+            </select>
+            <input name="name" value="{{ m.name }}" required>
+            <button class="btn" type="submit">Сохранить</button>
+          </form>
+
+          <form method="post" action="{{ url_for('admin.mahalla_delete', mahalla_id=m.id) }}" class="row-between dangerline">
+            <div class="muted small">Удаление возможно только если нет улиц.</div>
+            <button class="btn danger" type="submit" onclick="return confirm('Удалить махаллю?')">Удалить</button>
+          </form>
+        </div>
+      {% else %}
+        <div class="muted">Пока пусто</div>
+      {% endfor %}
+    </div>
+  </div>
+
+
+  <!-- Улицы -->
+  <div class="card">
+    <h2>Улицы</h2>
+
+    <form method="post" action="{{ url_for('admin.street_create') }}" class="stack">
+      <select name="mahalla_id" required>
+        <option value="">Выберите махаллю</option>
+        {% for m in mahallas %}
+          <option value="{{ m.id }}">{{ m.name }} · {{ m.district.name }}</option>
+        {% endfor %}
+      </select>
+      <input name="name" placeholder="Название улицы" required>
+      <button class="btn primary" type="submit">Добавить</button>
+    </form>
+
+    <div class="list compact">
+      {% for s in streets %}
+        <div class="row-between itemline">
+          <div class="title">
+            {{ s.name }}
+            <span class="muted small">· {{ s.mahalla.name }} · {{ s.mahalla.district.name }}</span>
+          </div>
+          <button class="btn smallbtn" type="button" onclick="toggleEdit('street-{{ s.id }}')">Изменить</button>
+        </div>
+
+        <div id="street-{{ s.id }}" class="editbox hidden">
+          <form method="post" action="{{ url_for('admin.street_update', street_id=s.id) }}" class="stack">
+            <select name="mahalla_id" required>
+              {% for m in mahallas %}
+                <option value="{{ m.id }}" {{ 'selected' if m.id==s.mahalla_id else '' }}>
+                  {{ m.name }} · {{ m.district.name }}
+                </option>
+              {% endfor %}
+            </select>
+            <input name="name" value="{{ s.name }}" required>
+            <button class="btn" type="submit">Сохранить</button>
+          </form>
+
+          <form method="post" action="{{ url_for('admin.street_delete', street_id=s.id) }}" class="row-between dangerline">
+            <div class="muted small">Нельзя удалить, если улица занята работником.</div>
+            <button class="btn danger" type="submit" onclick="return confirm('Удалить улицу?')">Удалить</button>
+          </form>
+        </div>
+      {% else %}
+        <div class="muted">Пока пусто</div>
+      {% endfor %}
+    </div>
+  </div>
+
+</div>
+
+<script>
+  function toggleEdit(id){
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.toggle('hidden');
+  }
+</script>
+
+{% endblock %}

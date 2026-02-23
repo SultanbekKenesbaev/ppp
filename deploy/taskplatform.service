@@ -1,0 +1,17 @@
+[Unit]
+Description=TaskPlatform Flask App
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/task-platform03
+Environment="FLASK_ENV=production"
+EnvironmentFile=/var/www/task-platform03/.env
+ExecStart=/var/www/task-platform03/venv/bin/gunicorn -c /var/www/task-platform03/deploy/gunicorn.conf.py "app:create_app()"
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="pagehead">
+  <h1>Работники</h1>
+</div>
+
+<div class="grid-2">
+  <div class="card">
+    <h2>Создать работника</h2>
+
+    {% if free_streets|length == 0 %}
+      <div class="muted">Нет свободных улиц. Сначала добавьте улицы в структуру.</div>
+    {% else %}
+    <form method="post" action="{{ url_for('admin.worker_create') }}" class="stack">
+      <select name="street_id" required>
+        <option value="">Выберите свободную улицу</option>
+        {% for s in free_streets %}
+          <option value="{{ s.id }}">{{ s.name }}</option>
+        {% endfor %}
+      </select>
+
+      <div class="grid-2">
+        <input name="last_name" placeholder="Фамилия" required>
+        <input name="first_name" placeholder="Имя" required>
+      </div>
+      <input name="middle_name" placeholder="Отчество">
+
+      <input name="note" placeholder="Пожелание / заметка">
+      <div class="grid-2">
+        <input name="login" placeholder="Логин" required>
+        <input name="password" placeholder="Пароль" required>
+      </div>
+
+      <button class="btn primary" type="submit">Создать</button>
+    </form>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="row-between">
+      <h2>Список</h2>
+      <form method="get" class="row">
+        <input name="q" value="{{ q or '' }}" placeholder="Поиск по ФИО">
+        <button class="btn" type="submit">Найти</button>
+      </form>
+    </div>
+    <div class="list">
+      {% for w in workers %}
+        <div class="item cardmini">
+          <div class="row-between">
+            <div class="row gap">
+              <div class="avatar avatar-sm">
+                {% if w.photo_path %}
+                  <img src="{{ url_for('auth.avatar_get', user_id=w.id) }}" alt="avatar">
+                {% else %}
+                  <div class="avatar-fallback">
+                    {{ (w.first_name[:1] ~ w.last_name[:1]).upper() }}
+                  </div>
+                {% endif %}
+              </div>
+              <div>
+                <div class="strong">{{ w.full_name }}</div>
+                <div class="muted small">@{{ w.login }}</div>
+              </div>
+            </div>
+          </div>
+
+          <form id="worker-update-{{ w.id }}" method="post" action="{{ url_for('admin.worker_update', worker_id=w.id) }}" class="stack">
+            <div class="grid-2">
+              <input name="last_name" value="{{ w.last_name }}" required>
+              <input name="first_name" value="{{ w.first_name }}" required>
+            </div>
+            <input name="middle_name" value="{{ w.middle_name }}">
+            <input name="note" value="{{ w.note }}">
+            <input name="password" placeholder="Новый пароль (если нужно)">
+          </form>
+          <form id="worker-delete-{{ w.id }}" method="post" action="{{ url_for('admin.worker_delete', worker_id=w.id) }}"></form>
+          <div class="row">
+            <button class="btn" type="submit" form="worker-update-{{ w.id }}">Сохранить</button>
+            <button class="btn danger" type="submit" form="worker-delete-{{ w.id }}" onclick="return confirm('Удалить работника?')">Удалить</button>
+          </div>
+        </div>
+      {% else %}
+        <div class="muted">Работников нет</div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endblock %}

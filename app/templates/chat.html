@@ -1,0 +1,229 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="chat-page">
+<div class="tg-chat">
+
+  <!-- HEADER -->
+  {% set other = conv.worker if me.role == "manager" else conv.manager %}
+  <div class="tg-head">
+    <a class="tg-back" href="{{ url_for('manager.chats') if me.role == 'manager' else url_for('worker.inbox') }}" aria-label="Назад к чатам">
+      <span>←</span>
+    </a>
+    <div class="tg-avatar" {% if other.photo_path %}data-full="{{ url_for('auth.avatar_get', user_id=other.id) }}"{% endif %}>
+      {% if other.photo_path %}
+        <img src="{{ url_for('auth.avatar_get', user_id=other.id) }}" alt="avatar">
+      {% else %}
+        <div class="avatar-fallback">
+          {{ (other.first_name[:1] ~ other.last_name[:1]).upper() }}
+        </div>
+      {% endif %}
+    </div>
+    <div class="tg-title">
+      <div class="tg-name">{{ other.full_name }}</div>
+      <div class="tg-sub muted">{{ "Работник" if me.role == "manager" else "Руководитель" }}</div>
+    </div>
+  </div>
+
+  <!-- MESSAGES -->
+  <div id="msgList"
+       class="tg-messages"
+       data-poll-url="{% if me.role == 'manager' %}{{ url_for('manager.chat_poll', conversation_id=conv.id) }}{% else %}{{ url_for('worker.chat_poll') }}{% endif %}">
+    {% set messages = conv.messages %}
+    {% include "partials/chat_messages.html" %}
+  </div>
+
+  <!-- COMPOSER -->
+  <div class="tg-compose">
+    <form method="post"
+          enctype="multipart/form-data"
+          action="{% if me.role=='manager' %}{{ url_for('manager.chat_send', conversation_id=conv.id) }}{% else %}{{ url_for('worker.chat_send') }}{% endif %}"
+          class="tg-form"
+          onsubmit="return tgBeforeSend()">
+
+      <label class="tg-clip">
+        <input id="fileInput" type="file" name="attachments" multiple>
+        <span class="tg-clip-btn">＋</span>
+      </label>
+
+      <textarea id="msgInput" name="body" class="tg-input" rows="1" placeholder="Сообщение..."></textarea>
+
+      <button class="tg-send" type="submit" title="Отправить"><span>➤</span></button>
+    </form>
+
+    <div id="pickedList" class="picked tg-picked"></div>
+  </div>
+
+</div>
+
+<div id="photoModal" class="photo-modal hidden" role="dialog" aria-modal="true">
+  <div class="photo-modal-bg" onclick="closePhotoModal()"></div>
+  <img id="photoModalImg" src="" alt="photo">
+</div>
+
+<script>
+  document.body.classList.add('chat-open');
+
+  const input = document.getElementById('msgInput');
+  const form  = document.querySelector('.tg-form');
+  const list  = document.getElementById('msgList');
+  const pollUrl = list ? list.dataset.pollUrl : null;
+  let lastRendered = list ? list.innerHTML.trim() : '';
+
+  function scrollToBottom(force=false){
+    const bottom = document.getElementById('bottomAnchor');
+    if (!list || !bottom) return;
+    const nearBottom = (list.scrollHeight - list.scrollTop - list.clientHeight) < 160;
+    if (force || nearBottom) bottom.scrollIntoView({block:'end', behavior:'auto'});
+  }
+
+  // Enter = send, Shift+Enter = newline
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+  });
+
+  // autosize textarea
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+  });
+
+  // remember send => after reload scroll down
+  form.addEventListener('submit', () => {
+    sessionStorage.setItem('tg_force_bottom', '1');
+  });
+
+  // initial scroll
+  scrollToBottom(true);
+
+  // after reload from send
+  if (sessionStorage.getItem('tg_force_bottom') === '1'){
+    sessionStorage.removeItem('tg_force_bottom');
+    setTimeout(() => scrollToBottom(true), 0);
+    setTimeout(() => scrollToBottom(true), 120);
+    setTimeout(() => scrollToBottom(true), 350);
+  }
+
+  function bindMessageEvents(){
+    if (!list) return;
+    list.querySelectorAll('img').forEach(img => {
+      img.addEventListener('load', () => {
+        const nearBottom = (list.scrollHeight - list.scrollTop - list.clientHeight) < 160;
+        if (nearBottom) scrollToBottom(true);
+      });
+    });
+  }
+  bindMessageEvents();
+
+  function tgBeforeSend(){
+    const hasText = (input.value || '').trim().length > 0;
+    const hasFiles = (document.getElementById('fileInput').files || []).length > 0;
+    return hasText || hasFiles;
+  }
+  function setupChatFilePicker(){
+    if (typeof initTgFilePicker === 'function') {
+      initTgFilePicker('fileInput', 'pickedList');
+    }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', setupChatFilePicker, { once: true });
+  } else {
+    setupChatFilePicker();
+  }
+
+  async function pollMessages(){
+    if (!pollUrl || !list) return;
+    try {
+      const url = pollUrl + (pollUrl.includes('?') ? '&' : '?') + 'ts=' + Date.now();
+      const nearBottom = (list.scrollHeight - list.scrollTop - list.clientHeight) < 160;
+      const prevTop = list.scrollTop;
+      const prevHeight = list.scrollHeight;
+      const res = await fetch(url, {
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        cache: 'no-store'
+      });
+      if (!res.ok) return;
+      const html = await res.text();
+      if (!html || !html.trim()) return;
+      const next = html.trim();
+      if (next === lastRendered) return;
+      list.innerHTML = html;
+      lastRendered = next;
+      bindMessageEvents();
+      if (nearBottom) {
+        scrollToBottom(true);
+      } else {
+        const newHeight = list.scrollHeight;
+        list.scrollTop = prevTop + (newHeight - prevHeight);
+      }
+    } catch (e) {
+      // ignore network errors while polling
+    }
+  }
+
+  let pollTimer = null;
+  function startPolling(){
+    if (!pollUrl || pollTimer) return;
+    pollTimer = setInterval(pollMessages, 3000);
+  }
+  function stopPolling(){
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  startPolling();
+
+  const convId = {{ conv.id }};
+  const wsScheme = (location.protocol === 'https:') ? 'wss' : 'ws';
+  const wsUrl = `${wsScheme}://${location.host}/ws/chat?conversation_id=${convId}`;
+  let ws = null;
+
+  function connectWs(){
+    try {
+      ws = new WebSocket(wsUrl);
+      ws.onopen = () => stopPolling();
+      ws.onmessage = () => pollMessages();
+      ws.onclose = () => {
+        startPolling();
+        setTimeout(connectWs, 2000);
+      };
+      ws.onerror = () => {
+        startPolling();
+      };
+    } catch (e) {
+      startPolling();
+    }
+  }
+
+  connectWs();
+
+  function openPhotoModal(src){
+    const modal = document.getElementById('photoModal');
+    const img = document.getElementById('photoModalImg');
+    if (!modal || !img) return;
+    img.src = src;
+    modal.classList.remove('hidden');
+  }
+  function closePhotoModal(){
+    const modal = document.getElementById('photoModal');
+    const img = document.getElementById('photoModalImg');
+    if (modal) modal.classList.add('hidden');
+    if (img) img.src = '';
+  }
+
+  const avatar = document.querySelector('.tg-avatar');
+  if (avatar && avatar.dataset.full) {
+    avatar.addEventListener('click', () => openPhotoModal(avatar.dataset.full));
+  }
+
+  window.addEventListener('pagehide', () => {
+    document.body.classList.remove('chat-open');
+  });
+
+</script>
+</div>
+{% endblock %}

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% set hide_sidebar = true %}
+{% block content %}
+
+<div class="auth-wrap">
+  <div class="auth-card">
+    <div class="auth-head">
+      <div class="auth-logo">TP</div>
+      <div>
+        <div class="auth-title">Вход в систему</div>
+      </div>
+    </div>
+
+    <form method="post" action="{{ url_for('auth.login_post') }}" class="auth-form">
+      <label class="field">
+        <span>Логин</span>
+        <input name="login" autocomplete="username" placeholder="Введите логин" required>
+      </label>
+
+      <label class="field">
+        <span>Пароль</span>
+        <div class="pass-row">
+          <input id="pass" name="password" type="password" autocomplete="current-password" placeholder="Введите пароль" required>
+          <button class="btn ghost" type="button" onclick="togglePass()">Показать</button>
+        </div>
+      </label>
+
+      <button class="btn primary auth-btn" type="submit">Войти</button>
+    </form>
+
+
+  </div>
+</div>
+
+<script>
+  function togglePass(){
+    const i = document.getElementById('pass');
+    i.type = (i.type === 'password') ? 'text' : 'password';
+  }
+</script>
+
+{% endblock %}
