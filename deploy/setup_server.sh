@@ -4,9 +4,8 @@ set -euo pipefail
 # ====== CONFIG ======
 DOMAIN="biychat.uz"
 EMAIL="dcbaalpvlape@gmail.com"
-REPO_URL="git@github.com:SultanbekKenesbaev/ppp.git"
+REPO_URL="https://github.com/SultanbekKenesbaev/ppp.git"
 GIT_TOKEN="${GIT_TOKEN:-}"
-SSH_KEY_PATH="${SSH_KEY_PATH:-/root/.ssh/id_ed25519}"
 APP_DIR="/var/www/task-platform03"
 APP_USER="www-data"
 APP_GROUP="www-data"
@@ -24,16 +23,6 @@ if [[ -n "$GIT_TOKEN" && "$REPO_URL" == https://* ]]; then
   AUTH_REPO_URL="${REPO_URL/https:\/\//https:\/\/$GIT_TOKEN@}"
 fi
 
-GIT_SSH_CMD=""
-if [[ "$REPO_URL" == git@* ]]; then
-  if [[ ! -f "$SSH_KEY_PATH" ]]; then
-    echo "ERROR: SSH key not found at $SSH_KEY_PATH"
-    echo "Set SSH_KEY_PATH or place your private key there."
-    exit 1
-  fi
-  GIT_SSH_CMD="ssh -i $SSH_KEY_PATH -o StrictHostKeyChecking=accept-new"
-fi
-
 # ====== PACKAGES ======
 log "Installing system пакеты"
 apt update
@@ -47,20 +36,12 @@ chown "$APP_USER":"$APP_GROUP" "$APP_DIR"
 # ====== CLONE / UPDATE ======
 if [[ ! -d "$APP_DIR/.git" ]]; then
   log "Cloning repository"
-  if [[ -n "$GIT_SSH_CMD" ]]; then
-    GIT_SSH_COMMAND="$GIT_SSH_CMD" git clone "$AUTH_REPO_URL" "$APP_DIR"
-  else
-    git clone "$AUTH_REPO_URL" "$APP_DIR"
-  fi
+  git clone "$AUTH_REPO_URL" "$APP_DIR"
   chown -R "$APP_USER":"$APP_GROUP" "$APP_DIR"
 else
   log "Updating repository"
   git -C "$APP_DIR" remote set-url origin "$AUTH_REPO_URL"
-  if [[ -n "$GIT_SSH_CMD" ]]; then
-    GIT_SSH_COMMAND="$GIT_SSH_CMD" git -C "$APP_DIR" pull --ff-only
-  else
-    git -C "$APP_DIR" pull --ff-only
-  fi
+  git -C "$APP_DIR" pull --ff-only
   chown -R "$APP_USER":"$APP_GROUP" "$APP_DIR"
 fi
 
