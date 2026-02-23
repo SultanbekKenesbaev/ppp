@@ -4,7 +4,7 @@ set -euo pipefail
 # ====== CONFIG ======
 DOMAIN="biychat.uz"
 EMAIL="dcbaalpvlape@gmail.com"
-REPO_URL="git@github.com:SultanbekKenesbaev/ddd.git"
+REPO_URL="git@github.com:SultanbekKenesbaev/ppp.git"
 GIT_TOKEN="${GIT_TOKEN:-}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-/root/.ssh/id_ed25519}"
 APP_DIR="/var/www/task-platform03"
