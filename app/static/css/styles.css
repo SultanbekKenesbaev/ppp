@@ -732,7 +732,12 @@ input:focus,select:focus,textarea:focus{
 .tree-workers{display:flex; flex-direction:column; gap:6px; margin-top:8px}
 .worker-row{display:flex; justify-content:space-between; gap:10px}
 .ok{color:var(--ok)}
-.picklist{max-height:260px; overflow:auto}
+.picklist{
+  max-height:320px;
+  overflow:auto;
+  overscroll-behavior:contain;
+  scrollbar-gutter:stable;
+}
 .pickrow{
   display:flex;
   gap:10px;
@@ -1214,13 +1219,16 @@ body.chat-open .mobile-nav{
    TASKS: mode switch (Всем / По районам)
    ========================= */
 .task-mode{
-  display:inline-flex;
+  display:flex;
+  flex-wrap:wrap;
   gap:6px;
   padding:6px;
   border:1px solid var(--line);
   background:#fff;
   border-radius:999px;
   align-items:center;
+  width:fit-content;
+  max-width:100%;
 }
 
 .task-mode .seg{
@@ -1281,6 +1289,12 @@ body.chat-open .mobile-nav{
   flex:1;
   text-align:left;   /* фикс если где-то наследуется right */
   font-weight:800;
+}
+
+.district-row .pickname .small{
+  display:block;
+  margin-top:2px;
+  font-weight:600;
 }
 
 .district-row .pick-right{
@@ -1384,4 +1398,14 @@ body.chat-open .mobile-nav{
   border-radius:18px;
   box-shadow: 0 20px 60px rgba(0,0,0,.35);
   z-index:1;
+}
+
+
+.target-tools{
+  margin:8px 0;
+  gap:10px;
+}
+.target-all{
+  align-items:center;
+  gap:8px;
 }

@@ -14,6 +14,111 @@ def _manager_id():
 def _all_workers_query():
     return User.query.filter_by(role="worker", is_active=True)
 
+
+def _parse_int_ids(values):
+    out = []
+    seen = set()
+    for raw in values or []:
+        try:
+            n = int(raw)
+        except Exception:
+            continue
+        if n in seen:
+            continue
+        seen.add(n)
+        out.append(n)
+    return out
+
+
+def _task_targets_payload():
+    active_workers = _all_workers_query().all()
+    total_all = len(active_workers)
+
+    assignments = {a.worker_id: a for a in WorkerAssignment.query.all()}
+    district_rows = District.query.order_by(District.name.asc()).all()
+    mahalla_rows = Mahalla.query.order_by(Mahalla.name.asc()).all()
+    street_rows = Street.query.order_by(Street.name.asc()).all()
+
+    district_by_id = {d.id: d for d in district_rows}
+    mahalla_by_id = {m.id: m for m in mahalla_rows}
+    street_by_id = {s.id: s for s in street_rows}
+
+    district_counts = {}
+    mahalla_counts = {}
+    street_counts = {}
+
+    for worker in active_workers:
+        a = assignments.get(worker.id)
+        if not a:
+            continue
+        street = street_by_id.get(a.street_id)
+        if not street:
+            continue
+        mahalla = mahalla_by_id.get(street.mahalla_id)
+        if not mahalla:
+            continue
+
+        street_counts[street.id] = street_counts.get(street.id, 0) + 1
+        mahalla_counts[mahalla.id] = mahalla_counts.get(mahalla.id, 0) + 1
+        if mahalla.district_id in district_by_id:
+            district_counts[mahalla.district_id] = district_counts.get(mahalla.district_id, 0) + 1
+
+    districts_json = [
+        {"id": d.id, "name": d.name, "count": district_counts.get(d.id, 0)}
+        for d in district_rows
+    ]
+
+    mahallas_json = []
+    for m in mahalla_rows:
+        district = district_by_id.get(m.district_id)
+        mahallas_json.append({
+            "id": m.id,
+            "name": m.name,
+            "district_id": m.district_id,
+            "district_name": district.name if district else "",
+            "count": mahalla_counts.get(m.id, 0),
+        })
+
+    streets_json = []
+    for s in street_rows:
+        mahalla = mahalla_by_id.get(s.mahalla_id)
+        district = district_by_id.get(mahalla.district_id) if mahalla else None
+        streets_json.append({
+            "id": s.id,
+            "name": s.name,
+            "mahalla_id": s.mahalla_id,
+            "mahalla_name": mahalla.name if mahalla else "",
+            "district_id": district.id if district else None,
+            "district_name": district.name if district else "",
+            "count": street_counts.get(s.id, 0),
+        })
+
+    return total_all, districts_json, mahallas_json, streets_json
+
+
+def _worker_ids_for_target(mode: str, target_ids):
+    if mode == "all":
+        return [w.id for w in _all_workers_query().all()]
+
+    workers_q = (
+        User.query
+        .join(WorkerAssignment, WorkerAssignment.worker_id == User.id)
+        .join(Street, WorkerAssignment.street_id == Street.id)
+        .join(Mahalla, Street.mahalla_id == Mahalla.id)
+        .filter(User.role == "worker", User.is_active == True)
+    )
+
+    if mode == "districts":
+        workers_q = workers_q.filter(Mahalla.district_id.in_(target_ids))
+    elif mode == "mahallas":
+        workers_q = workers_q.filter(Street.mahalla_id.in_(target_ids))
+    elif mode == "streets":
+        workers_q = workers_q.filter(WorkerAssignment.street_id.in_(target_ids))
+    else:
+        return []
+
+    return sorted({w.id for w in workers_q.all()})
+
 @bp.get("/tasks")
 @login_required
 def tasks():
@@ -33,37 +138,13 @@ def tasks():
         percent = int((read / total) * 100) if total else 0
         data.append({"batch": b, "total": total, "read": read, "percent": percent})
 
-    # --- СЧЁТЧИКИ ДЛЯ UI (районы -> сколько работников) ---
-    # active workers
-    active_workers = _all_workers_query().all()
-    total_all = len(active_workers)
-
-    # mapping: worker_id -> district_id
-    assigns = WorkerAssignment.query.all()
-    streets = {s.id: s for s in Street.query.all()}
-    mahallas = {m.id: m for m in Mahalla.query.all()}
-    districts = District.query.order_by(District.name.asc()).all()
-
-    worker_to_district = {}
-    for a in assigns:
-        st = streets.get(a.street_id)
-        mh = mahallas.get(st.mahalla_id) if st else None
-        did = mh.district_id if mh else None
-        if did:
-            worker_to_district[a.worker_id] = did
-
-    # count workers per district (only active)
-    counts = {}
-    for w in active_workers:
-        did = worker_to_district.get(w.id)
-        if did:
-            counts[did] = counts.get(did, 0) + 1
-
-    districts_json = [{"id": d.id, "name": d.name, "count": counts.get(d.id, 0)} for d in districts]
+    total_all, districts_json, mahallas_json, streets_json = _task_targets_payload()
 
     return render_template("manager_tasks.html",
                            batches=data,
                            districts_json=districts_json,
+                           mahallas_json=mahallas_json,
+                           streets_json=streets_json,
                            total_all=total_all)
 
 
@@ -74,35 +155,38 @@ def send_task():
 
     title = request.form.get("title", "").strip()
     body = request.form.get("body", "").strip()
-    mode = request.form.get("mode", "all")  # all | districts
+    mode = request.form.get("mode", "all").strip()  # all | districts | mahallas | streets
 
     if not title:
         flash("Название задачи обязательно", "error")
         return redirect(url_for("manager.tasks"))
 
-    # recipients
-    worker_ids = []
-    if mode == "districts":
-        raw = request.form.getlist("district_ids")
-        district_ids = [int(x) for x in raw if x.isdigit()]
+    mode_to_param = {
+        "districts": "district_ids",
+        "mahallas": "mahalla_ids",
+        "streets": "street_ids",
+    }
+    mode_to_error = {
+        "districts": "Выберите хотя бы один район",
+        "mahallas": "Выберите хотя бы одну махаллю",
+        "streets": "Выберите хотя бы одну улицу",
+    }
 
-        if not district_ids:
-            flash("Выберите хотя бы один район", "error")
+    if mode != "all" and mode not in mode_to_param:
+        flash("Неверный режим отправки", "error")
+        return redirect(url_for("manager.tasks"))
+
+    target_ids = []
+    if mode in mode_to_param:
+        target_ids = _parse_int_ids(request.form.getlist(mode_to_param[mode]))
+        if not target_ids:
+            flash(mode_to_error[mode], "error")
             return redirect(url_for("manager.tasks"))
 
-        # workers in selected districts (active)
-        workers = (
-            User.query
-            .join(WorkerAssignment, WorkerAssignment.worker_id == User.id)
-            .join(Street, WorkerAssignment.street_id == Street.id)
-            .join(Mahalla, Street.mahalla_id == Mahalla.id)
-            .filter(User.role == "worker", User.is_active == True)
-            .filter(Mahalla.district_id.in_(district_ids))
-            .all()
-        )
-        worker_ids = [w.id for w in workers]
-    else:
-        worker_ids = [w.id for w in _all_workers_query().all()]
+    worker_ids = _worker_ids_for_target(mode, target_ids)
+    if not worker_ids:
+        flash("Нет работников для выбранной группы", "error")
+        return redirect(url_for("manager.tasks"))
 
 
     # batch create

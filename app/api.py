@@ -125,6 +125,110 @@ def _push_to_user(user_id: int, title: str, body: str, data: dict | None = None)
         db.session.commit()
 
 
+def _parse_int_ids(values):
+    out = []
+    seen = set()
+    for raw in values or []:
+        try:
+            n = int(raw)
+        except Exception:
+            continue
+        if n in seen:
+            continue
+        seen.add(n)
+        out.append(n)
+    return out
+
+
+def _worker_ids_for_target(mode: str, target_ids):
+    if mode == "all":
+        return [w.id for w in User.query.filter_by(role="worker", is_active=True).all()]
+
+    workers_q = (
+        User.query
+        .join(WorkerAssignment, WorkerAssignment.worker_id == User.id)
+        .join(Street, WorkerAssignment.street_id == Street.id)
+        .join(Mahalla, Street.mahalla_id == Mahalla.id)
+        .filter(User.role == "worker", User.is_active == True)
+    )
+
+    if mode == "districts":
+        workers_q = workers_q.filter(Mahalla.district_id.in_(target_ids))
+    elif mode == "mahallas":
+        workers_q = workers_q.filter(Street.mahalla_id.in_(target_ids))
+    elif mode == "streets":
+        workers_q = workers_q.filter(WorkerAssignment.street_id.in_(target_ids))
+    else:
+        return []
+
+    return sorted({w.id for w in workers_q.all()})
+
+
+def _manager_target_options():
+    district_rows = District.query.order_by(District.name.asc()).all()
+    mahalla_rows = Mahalla.query.order_by(Mahalla.name.asc()).all()
+    street_rows = Street.query.order_by(Street.name.asc()).all()
+
+    district_by_id = {d.id: d for d in district_rows}
+    mahalla_by_id = {m.id: m for m in mahalla_rows}
+    street_by_id = {s.id: s for s in street_rows}
+
+    assignments = {a.worker_id: a for a in WorkerAssignment.query.all()}
+    active_workers = User.query.filter_by(role="worker", is_active=True).all()
+
+    district_counts = {}
+    mahalla_counts = {}
+    street_counts = {}
+    for worker in active_workers:
+        a = assignments.get(worker.id)
+        if not a:
+            continue
+        street = street_by_id.get(a.street_id)
+        if not street:
+            continue
+        mahalla = mahalla_by_id.get(street.mahalla_id)
+        if not mahalla:
+            continue
+
+        street_counts[street.id] = street_counts.get(street.id, 0) + 1
+        mahalla_counts[mahalla.id] = mahalla_counts.get(mahalla.id, 0) + 1
+        if mahalla.district_id in district_by_id:
+            district_counts[mahalla.district_id] = district_counts.get(mahalla.district_id, 0) + 1
+
+    districts = [{
+        "id": d.id,
+        "name": d.name,
+        "count": district_counts.get(d.id, 0),
+    } for d in district_rows]
+
+    mahallas = []
+    for m in mahalla_rows:
+        district = district_by_id.get(m.district_id)
+        mahallas.append({
+            "id": m.id,
+            "name": m.name,
+            "district_id": m.district_id,
+            "district_name": district.name if district else "",
+            "count": mahalla_counts.get(m.id, 0),
+        })
+
+    streets = []
+    for s in street_rows:
+        mahalla = mahalla_by_id.get(s.mahalla_id)
+        district = district_by_id.get(mahalla.district_id) if mahalla else None
+        streets.append({
+            "id": s.id,
+            "name": s.name,
+            "mahalla_id": s.mahalla_id,
+            "mahalla_name": mahalla.name if mahalla else "",
+            "district_id": district.id if district else None,
+            "district_name": district.name if district else "",
+            "count": street_counts.get(s.id, 0),
+        })
+
+    return districts, mahallas, streets
+
+
 def api_auth_required(*roles: str):
     def deco(fn):
         @wraps(fn)
@@ -407,10 +511,13 @@ def manager_chats():
             "last_message_time": _iso_uz(last_msg.sent_at) if last_msg else None,
         })
 
+    district_opts, mahalla_opts, street_opts = _manager_target_options()
+
     return jsonify({
         "items": items,
-        "districts": [{"id": d.id, "name": d.name} for d in districts.values()],
-        "mahallas": [{"id": m.id, "name": m.name, "district_id": m.district_id} for m in mahallas.values()],
+        "districts": district_opts,
+        "mahallas": mahalla_opts,
+        "streets": street_opts,
     })
 
 
@@ -502,42 +609,40 @@ def manager_tasks_send():
     data = request.get_json(silent=True) or {}
     title = (request.form.get("title") or data.get("title") or "").strip()
     body = (request.form.get("body") or data.get("body") or "").strip()
-    mode = (request.form.get("mode") or data.get("mode") or "all").strip()  # all | districts
+    mode = (request.form.get("mode") or data.get("mode") or "all").strip()  # all | districts | mahallas | streets
 
     if not title:
         return jsonify({"error": "title_required"}), 400
 
-    # districts list
-    raw = request.form.getlist("district_ids")
-    if not raw:
-        raw = data.get("district_ids") or []
-    if isinstance(raw, str):
-        raw = [x for x in raw.replace(";", ",").split(",") if x.strip()]
+    mode_to_param = {
+        "districts": "district_ids",
+        "mahallas": "mahalla_ids",
+        "streets": "street_ids",
+    }
+    mode_to_error = {
+        "districts": "districts_required",
+        "mahallas": "mahallas_required",
+        "streets": "streets_required",
+    }
 
-    district_ids = []
-    for x in raw:
-        try:
-            district_ids.append(int(x))
-        except Exception:
-            continue
+    if mode != "all" and mode not in mode_to_param:
+        return jsonify({"error": "invalid_mode"}), 400
 
-    # recipients
-    worker_ids = []
-    if mode == "districts":
-        if not district_ids:
-            return jsonify({"error": "districts_required"}), 400
-        workers = (
-            User.query
-            .join(WorkerAssignment, WorkerAssignment.worker_id == User.id)
-            .join(Street, WorkerAssignment.street_id == Street.id)
-            .join(Mahalla, Street.mahalla_id == Mahalla.id)
-            .filter(User.role == "worker", User.is_active == True)
-            .filter(Mahalla.district_id.in_(district_ids))
-            .all()
-        )
-        worker_ids = [w.id for w in workers]
-    else:
-        worker_ids = [w.id for w in User.query.filter_by(role="worker", is_active=True).all()]
+    target_ids = []
+    if mode in mode_to_param:
+        param = mode_to_param[mode]
+        raw = request.form.getlist(param)
+        if not raw:
+            raw = data.get(param) or []
+        if isinstance(raw, str):
+            raw = [x for x in raw.replace(";", ",").split(",") if x.strip()]
+        target_ids = _parse_int_ids(raw)
+        if not target_ids:
+            return jsonify({"error": mode_to_error[mode]}), 400
+
+    worker_ids = _worker_ids_for_target(mode, target_ids)
+    if not worker_ids:
+        return jsonify({"error": "no_recipients"}), 400
 
     batch = TaskBatch(manager_id=u.id, title=title, body=body)
     db.session.add(batch)

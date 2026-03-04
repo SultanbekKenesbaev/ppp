@@ -14,22 +14,35 @@
     <input name="title" placeholder="Название" required>
     <textarea name="body" placeholder="Текст" rows="4"></textarea>
 
-<div class="task-mode">
-  <label class="seg">
-    <input type="radio" name="mode" value="all" checked>
-    <span>Всем</span>
-  </label>
-  <label class="seg">
-    <input type="radio" name="mode" value="districts">
-    <span>По районам</span>
-  </label>
-</div>
+    <div class="task-mode">
+      <label class="seg">
+        <input type="radio" name="mode" value="all" checked>
+        <span>Всем</span>
+      </label>
+      <label class="seg">
+        <input type="radio" name="mode" value="districts">
+        <span>По районам</span>
+      </label>
+      <label class="seg">
+        <input type="radio" name="mode" value="mahallas">
+        <span>По махаллям</span>
+      </label>
+      <label class="seg">
+        <input type="radio" name="mode" value="streets">
+        <span>По улицам</span>
+      </label>
+    </div>
 
-
-    <div id="districtBox" class="hidden">
-      <input id="districtSearch" placeholder="Поиск района..." autocomplete="off">
-      <div id="districtsList" class="list picklist"></div>
-
+    <div id="targetBox" class="hidden">
+      <input id="targetSearch" placeholder="Поиск..." autocomplete="off">
+      <div class="row-between target-tools">
+        <label class="row target-all">
+          <input id="targetSelectAll" class="tg-check" type="checkbox">
+          <span id="targetSelectAllLabel" class="small">Выбрать все</span>
+        </label>
+        <button id="targetClearBtn" type="button" class="btn smallbtn">Очистить</button>
+      </div>
+      <div id="targetList" class="list picklist"></div>
     </div>
 
     <div class="row-between">
@@ -87,97 +100,255 @@
 
 <script>
   const composeCard = document.getElementById('composeCard');
-  const districtBox = document.getElementById('districtBox');
+  const targetBox = document.getElementById('targetBox');
+  const targetSearch = document.getElementById('targetSearch');
+  const targetList = document.getElementById('targetList');
+  const targetSelectAll = document.getElementById('targetSelectAll');
+  const targetSelectAllLabel = document.getElementById('targetSelectAllLabel');
+  const targetClearBtn = document.getElementById('targetClearBtn');
   const rcptCountEl = document.getElementById('rcptCount');
-  const rcptHintEl  = document.getElementById('rcptHint');
-  const submitBtn   = document.getElementById('taskSubmit');
-  const form        = document.getElementById('taskForm');
+  const rcptHintEl = document.getElementById('rcptHint');
+  const submitBtn = document.getElementById('taskSubmit');
+  const form = document.getElementById('taskForm');
 
   const TOTAL_ALL = {{ total_all|int }};
-  const DISTRICTS = {{ districts_json|safe }}; // [{id,name,count}]
+  const DISTRICTS = {{ districts_json|safe }};
+  const MAHALLAS = {{ mahallas_json|safe }};
+  const STREETS = {{ streets_json|safe }};
 
-  function toggleCompose(v){
-    composeCard.style.display = v ? 'block' : 'none';
-    if (v){
-      renderDistricts(DISTRICTS);
-      updateRecipients();
+  const MODE_META = {
+    districts: {
+      field: 'district_ids',
+      emptyHint: 'Выберите районы',
+      emptyAlert: 'Выберите хотя бы один район',
+      searchPlaceholder: 'Поиск района...',
+      selectAllLabel: 'Отправить всем районам в списке'
+    },
+    mahallas: {
+      field: 'mahalla_ids',
+      emptyHint: 'Выберите махалли',
+      emptyAlert: 'Выберите хотя бы одну махаллю',
+      searchPlaceholder: 'Поиск махалли...',
+      selectAllLabel: 'Отправить всем махаллям в списке'
+    },
+    streets: {
+      field: 'street_ids',
+      emptyHint: 'Выберите улицы',
+      emptyAlert: 'Выберите хотя бы одну улицу',
+      searchPlaceholder: 'Поиск улицы...',
+      selectAllLabel: 'Отправить всем улицам в списке'
+    }
+  };
+
+  const selectedByMode = {
+    districts: new Set(),
+    mahallas: new Set(),
+    streets: new Set()
+  };
+
+  function currentMode() {
+    return document.querySelector('input[name="mode"]:checked')?.value || 'all';
+  }
+
+  function getItems(mode) {
+    if (mode === 'districts') return DISTRICTS;
+    if (mode === 'mahallas') return MAHALLAS;
+    if (mode === 'streets') return STREETS;
+    return [];
+  }
+
+  function selectedIds(mode) {
+    return Array.from(selectedByMode[mode] || []).filter(Number.isFinite);
+  }
+
+  function pruneDependentSelections() {
+    if (selectedByMode.districts.size > 0) {
+      const allowedMahallas = new Set(
+        MAHALLAS.filter(m => selectedByMode.districts.has(m.district_id)).map(m => m.id)
+      );
+      selectedByMode.mahallas.forEach(id => {
+        if (!allowedMahallas.has(id)) selectedByMode.mahallas.delete(id);
+      });
+
+      selectedByMode.streets.forEach(id => {
+        const st = STREETS.find(s => s.id === id);
+        if (!st) {
+          selectedByMode.streets.delete(id);
+          return;
+        }
+        if (!selectedByMode.districts.has(st.district_id)) {
+          selectedByMode.streets.delete(id);
+          return;
+        }
+        if (selectedByMode.mahallas.size > 0 && !selectedByMode.mahallas.has(st.mahalla_id)) {
+          selectedByMode.streets.delete(id);
+        }
+      });
+      return;
+    }
+
+    if (selectedByMode.mahallas.size > 0) {
+      selectedByMode.streets.forEach(id => {
+        const st = STREETS.find(s => s.id === id);
+        if (!st || !selectedByMode.mahallas.has(st.mahalla_id)) {
+          selectedByMode.streets.delete(id);
+        }
+      });
     }
   }
 
-  // mode change
-  document.querySelectorAll('input[name="mode"]').forEach(r=>{
-    r.addEventListener('change', ()=>{
-      const mode = document.querySelector('input[name="mode"]:checked')?.value || "all";
-      if (mode === 'districts'){
-        districtBox.classList.remove('hidden');
-      } else {
-        districtBox.classList.add('hidden');
-        // очистим выбор районов
-        document.querySelectorAll('input[name="district_ids"]').forEach(x => x.checked = false);
-      }
-      updateRecipients();
-    });
-  });
+  function filterByHierarchy(items, mode) {
+    if (mode === 'districts') return items;
 
-  // render districts
-  function renderDistricts(arr){
-    const box = document.getElementById('districtsList');
-    box.innerHTML = '';
-    arr.forEach(d=>{
+    if (mode === 'mahallas') {
+      if (selectedByMode.districts.size === 0) return items;
+      return items.filter(m => selectedByMode.districts.has(m.district_id));
+    }
+
+    if (mode === 'streets') {
+      return items.filter(s => {
+        if (selectedByMode.districts.size > 0 && !selectedByMode.districts.has(s.district_id)) {
+          return false;
+        }
+        if (selectedByMode.mahallas.size > 0 && !selectedByMode.mahallas.has(s.mahalla_id)) {
+          return false;
+        }
+        return true;
+      });
+    }
+
+    return items;
+  }
+
+  function extraMeta(item, mode) {
+    if (mode === 'mahallas') {
+      return item.district_name || '';
+    }
+    if (mode === 'streets') {
+      const m = item.mahalla_name || '';
+      const d = item.district_name || '';
+      return [m, d].filter(Boolean).join(' • ');
+    }
+    return '';
+  }
+
+  function visibleItems(mode) {
+    let items = filterByHierarchy(getItems(mode), mode);
+    const q = (targetSearch?.value || '').toLowerCase().trim();
+    if (q) {
+      items = items.filter((it) => {
+        const hay = `${it.name || ''} ${extraMeta(it, mode)}`.toLowerCase();
+        return hay.includes(q);
+      });
+    }
+    return items;
+  }
+
+  function visibleIds(mode) {
+    return visibleItems(mode).map(it => it.id);
+  }
+
+  function updateSelectAllState(mode) {
+    if (!targetSelectAll) return;
+    if (mode === 'all') {
+      targetSelectAll.checked = false;
+      targetSelectAll.indeterminate = false;
+      targetSelectAll.disabled = true;
+      return;
+    }
+
+    const ids = visibleIds(mode);
+    const selected = selectedByMode[mode];
+    const selectedVisible = ids.filter(id => selected.has(id)).length;
+
+    targetSelectAll.disabled = ids.length === 0;
+    targetSelectAll.checked = ids.length > 0 && selectedVisible === ids.length;
+    targetSelectAll.indeterminate = selectedVisible > 0 && selectedVisible < ids.length;
+  }
+
+  function renderTargetList(mode) {
+    targetList.innerHTML = '';
+    if (mode === 'all') return;
+
+    const items = visibleItems(mode);
+    if (items.length === 0) {
+      targetList.innerHTML = '<div class="muted small">Ничего не найдено</div>';
+      updateSelectAllState(mode);
+      return;
+    }
+
+    const field = MODE_META[mode].field;
+    items.forEach((item) => {
       const row = document.createElement('label');
-row.className = 'pickrow district-row';
-row.innerHTML = `
-  <span class="pick-left">
-    <input class="tg-check" type="checkbox" name="district_ids" value="${d.id}">
-  </span>
-
-  <span class="pickname">${escapeHtml(d.name)}</span>
-
-  <span class="pick-right muted small">${d.count} чел.</span>
-`;
-
-      box.appendChild(row);
+      row.className = 'pickrow district-row';
+      const checked = selectedByMode[mode].has(item.id) ? 'checked' : '';
+      const meta = extraMeta(item, mode);
+      row.innerHTML = `
+        <span class="pick-left">
+          <input class="tg-check" type="checkbox" name="${field}" value="${item.id}" ${checked}>
+        </span>
+        <span class="pickname">
+          ${escapeHtml(item.name)}
+          ${meta ? `<div class="muted small">${escapeHtml(meta)}</div>` : ''}
+        </span>
+        <span class="pick-right muted small">${item.count || 0} чел.</span>
+      `;
+      targetList.appendChild(row);
     });
 
-    // слушаем чекбоксы после отрисовки
-    box.querySelectorAll('input[name="district_ids"]').forEach(cb=>{
-      cb.addEventListener('change', updateRecipients);
+    targetList.querySelectorAll(`input[name="${field}"]`).forEach((cb) => {
+      cb.addEventListener('change', () => {
+        const id = parseInt(cb.value, 10);
+        if (!Number.isFinite(id)) return;
+        if (cb.checked) selectedByMode[mode].add(id);
+        else selectedByMode[mode].delete(id);
+
+        if (mode === 'districts' || mode === 'mahallas') {
+          pruneDependentSelections();
+        }
+        updateRecipients();
+        updateSelectAllState(mode);
+      });
     });
+
+    updateSelectAllState(mode);
   }
 
-  // search filter
-  document.getElementById('districtSearch')?.addEventListener('input', ()=>{
-    const q = (document.getElementById('districtSearch').value || '').toLowerCase().trim();
-    const filtered = DISTRICTS.filter(d => d.name.toLowerCase().includes(q));
-    renderDistricts(filtered);
-    updateRecipients(); // чтобы счётчик не ломался при перерисовке
-  });
+  function setModeUi(mode) {
+    if (mode === 'all') {
+      targetBox.classList.add('hidden');
+      rcptHintEl.textContent = '';
+      return;
+    }
 
-  function selectedDistrictIds(){
-    return Array.from(document.querySelectorAll('input[name="district_ids"]:checked'))
-      .map(x => parseInt(x.value, 10))
-      .filter(n => Number.isFinite(n));
+    targetBox.classList.remove('hidden');
+    targetSearch.value = '';
+    targetSearch.placeholder = MODE_META[mode].searchPlaceholder;
+    targetSelectAllLabel.textContent = MODE_META[mode].selectAllLabel;
+    renderTargetList(mode);
   }
 
-  function updateRecipients(){
-    const mode = document.querySelector('input[name="mode"]:checked')?.value || "all";
+  function recipientsCount(mode) {
+    if (mode === 'all') return TOTAL_ALL;
+    const ids = selectedIds(mode);
+    const byId = new Map(getItems(mode).map(it => [it.id, it.count || 0]));
+    return ids.reduce((sum, id) => sum + (byId.get(id) || 0), 0);
+  }
 
-    let n = 0;
-    if (mode === "all"){
-      n = TOTAL_ALL;
+  function updateRecipients() {
+    const mode = currentMode();
+    const n = recipientsCount(mode);
+
+    if (mode === 'all') {
       rcptHintEl.textContent = '';
     } else {
-      const ids = selectedDistrictIds();
-      const byId = new Map(DISTRICTS.map(d => [d.id, d.count]));
-      n = ids.reduce((sum, id) => sum + (byId.get(id) || 0), 0);
-
-      rcptHintEl.textContent = ids.length ? '' : 'Выберите районы';
+      const hasSelected = selectedIds(mode).length > 0;
+      rcptHintEl.textContent = hasSelected ? '' : MODE_META[mode].emptyHint;
     }
 
     rcptCountEl.textContent = String(n);
 
-    // блокируем отправку, если recipients = 0
-    if (n <= 0){
+    if (n <= 0) {
       submitBtn.disabled = true;
       submitBtn.classList.add('disabled');
     } else {
@@ -186,18 +357,67 @@ row.innerHTML = `
     }
   }
 
-  // forbid empty send
-  form.addEventListener('submit', (e)=>{
-    const mode = document.querySelector('input[name="mode"]:checked')?.value || "all";
-    if (mode === "districts" && selectedDistrictIds().length === 0){
+  function toggleCompose(v) {
+    composeCard.style.display = v ? 'block' : 'none';
+    if (v) {
+      setModeUi(currentMode());
+      updateRecipients();
+    }
+  }
+
+  document.querySelectorAll('input[name="mode"]').forEach((r) => {
+    r.addEventListener('change', () => {
+      setModeUi(currentMode());
+      updateRecipients();
+    });
+  });
+
+  targetSearch?.addEventListener('input', () => {
+    renderTargetList(currentMode());
+    updateRecipients();
+  });
+
+  targetSelectAll?.addEventListener('change', () => {
+    const mode = currentMode();
+    if (mode === 'all') return;
+
+    const ids = visibleIds(mode);
+    ids.forEach((id) => {
+      if (targetSelectAll.checked) selectedByMode[mode].add(id);
+      else selectedByMode[mode].delete(id);
+    });
+
+    if (mode === 'districts' || mode === 'mahallas') {
+      pruneDependentSelections();
+    }
+
+    renderTargetList(mode);
+    updateRecipients();
+  });
+
+  targetClearBtn?.addEventListener('click', () => {
+    const mode = currentMode();
+    if (mode === 'all') return;
+
+    selectedByMode[mode].clear();
+    if (mode === 'districts' || mode === 'mahallas') {
+      pruneDependentSelections();
+    }
+
+    renderTargetList(mode);
+    updateRecipients();
+  });
+
+  form.addEventListener('submit', (e) => {
+    const mode = currentMode();
+    if (mode !== 'all' && selectedIds(mode).length === 0) {
       e.preventDefault();
-      alert("Выберите хотя бы один район");
+      alert(MODE_META[mode].emptyAlert);
       return;
     }
   });
 
-  // attachments picker (append files like TG)
-  function setupTaskFilePicker(){
+  function setupTaskFilePicker() {
     if (typeof initTgFilePicker !== 'function') return;
     initTgFilePicker('taskFiles', 'pickedTaskList', (count) => {
       const hint = document.getElementById('taskFilesHint');
@@ -210,7 +430,7 @@ row.innerHTML = `
     setupTaskFilePicker();
   }
 
-  // initial recipients count
+  setModeUi(currentMode());
   updateRecipients();
 
   function openTaskDetails(batchId){
