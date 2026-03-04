@@ -1409,3 +1409,148 @@ body.chat-open .mobile-nav{
   align-items:center;
   gap:8px;
 }
+
+/* =========================
+   ADMIN IMPORT
+   ========================= */
+.admin-import-grid{
+  align-items:start;
+}
+
+.import-rules{
+  margin-top:12px;
+  padding:12px;
+  border:1px solid var(--line);
+  border-radius:14px;
+  background:#f8fafc;
+}
+
+.import-rules ul{
+  margin:8px 0 0 18px;
+  padding:0;
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+}
+
+.import-notes .itemline{
+  border-bottom:1px dashed var(--line);
+}
+
+.import-summary-card,
+.import-log-card{
+  margin-top:14px;
+}
+
+.import-summary{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+}
+
+.import-summary .chip{
+  min-height:40px;
+}
+
+.import-log-tools{
+  margin-top:10px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  flex-wrap:wrap;
+}
+
+.import-log-filters{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+}
+
+.import-filter-btn{
+  height:38px;
+  padding:0 12px;
+  border-radius:12px;
+}
+
+.import-filter-btn.active{
+  background:#eef2ff;
+  border-color:#c7d2fe;
+  color:var(--accent2);
+  font-weight:800;
+}
+
+.import-log-wrap{
+  margin-top:8px;
+  max-height:520px;
+  overflow:auto;
+  border:1px solid var(--line);
+  border-radius:14px;
+}
+
+.import-log-table{
+  width:100%;
+  border-collapse:collapse;
+  min-width:980px;
+  background:#fff;
+}
+
+.import-log-table th,
+.import-log-table td{
+  border-bottom:1px solid var(--line);
+  padding:8px 10px;
+  text-align:left;
+  vertical-align:top;
+  font-size:13px;
+}
+
+.import-log-table th{
+  position:sticky;
+  top:0;
+  background:#f8fafc;
+  z-index:1;
+  font-weight:800;
+}
+
+.import-status{
+  display:inline-flex;
+  align-items:center;
+  padding:4px 8px;
+  border-radius:999px;
+  font-size:11px;
+  font-weight:800;
+  border:1px solid transparent;
+  white-space:nowrap;
+}
+
+.import-status-ok{
+  background:#dcfce7;
+  color:#14532d;
+  border-color:#bbf7d0;
+}
+
+.import-status-skip{
+  background:#fef9c3;
+  color:#854d0e;
+  border-color:#fde68a;
+}
+
+.import-status-error{
+  background:#fee2e2;
+  color:#991b1b;
+  border-color:#fecaca;
+}
+
+@media (max-width: 720px){
+  .import-log-tools{
+    align-items:stretch;
+  }
+
+  .import-log-filters{
+    width:100%;
+  }
+
+  .import-filter-btn{
+    flex:1 1 calc(50% - 6px);
+  }
+}

@@ -37,6 +37,8 @@
    href="{{ url_for('admin.structure') }}">Структура</a>
             <a class="navlink {{ 'active' if request.path.startswith('/admin/workers') else '' }}"
    href="{{ url_for('admin.workers') }}">Работники</a>
+            <a class="navlink {{ 'active' if request.path.startswith('/admin/import') else '' }}"
+   href="{{ url_for('admin.import_page') }}">Импорт</a>
           {% elif current_user.role == "manager" %}
             <a class="navlink {{ 'active' if request.path.startswith('/manager/tasks') else '' }}"
    href="{{ url_for('manager.tasks') }}">Задачи</a>
@@ -67,6 +69,8 @@
              href="{{ url_for('admin.structure') }}">Структура</a>
           <a class="mobile-nav-link {{ 'active' if request.path.startswith('/admin/workers') else '' }}"
              href="{{ url_for('admin.workers') }}">Работники</a>
+          <a class="mobile-nav-link {{ 'active' if request.path.startswith('/admin/import') else '' }}"
+             href="{{ url_for('admin.import_page') }}">Импорт</a>
         {% elif current_user.role == "manager" %}
           <a class="mobile-nav-link {{ 'active' if request.path.startswith('/manager/tasks') else '' }}"
              href="{{ url_for('manager.tasks') }}">Задачи</a>

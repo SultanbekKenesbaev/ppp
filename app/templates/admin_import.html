@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="pagehead">
+  <h1>Импорт</h1>
+</div>
+
+<div class="grid-2 admin-import-grid">
+  <div class="card">
+    <h2>Загрузка структуры и работников</h2>
+
+    <form method="post" action="{{ url_for('admin.import_upload') }}" enctype="multipart/form-data" class="stack">
+      <select name="district_id" required>
+        <option value="">Выберите район</option>
+        {% for d in districts %}
+          <option value="{{ d.id }}" {{ 'selected' if selected_district_id == d.id else '' }}>{{ d.name }}</option>
+        {% endfor %}
+      </select>
+
+      <input type="file" name="file" accept=".xlsx,.xls,.csv" required>
+
+      <button class="btn primary" type="submit">Загрузить и импортировать</button>
+    </form>
+
+    <div class="import-rules">
+      <div class="muted small">Требования к файлу:</div>
+      <ul>
+        <li>Формат: {{ allowed_extensions }}</li>
+        <li>1-я строка — заголовки</li>
+        <li>2-й столбец: махалля</li>
+        <li>3-й столбец: улица</li>
+        <li>4-й столбец: ФИО работника</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Как работает импорт</h2>
+    <div class="list compact import-notes">
+      <div class="itemline">Махалли и улицы создаются без дублей (по району/махалле).</div>
+      <div class="itemline">Если улица занята, строка пропускается и попадает в отчет.</div>
+      <div class="itemline">Логин создается автоматически: <strong>Фамилия+Имя</strong> (latin, lowercase).</div>
+      <div class="itemline">Пароль новых работников: <strong>123456</strong>.</div>
+      <div class="itemline">Импорт частичный: ошибки в строках не останавливают весь файл.</div>
+    </div>
+  </div>
+</div>
+
+{% if report %}
+  <div class="card import-summary-card">
+    <h2>Результат импорта · {{ report.filename }}</h2>
+    <div class="import-summary">
+      <div class="chip"><span>Район:</span><strong>{{ report.district_name }}</strong></div>
+      <div class="chip"><span>Обработано:</span><strong>{{ report.summary.processed_rows }}</strong></div>
+      <div class="chip"><span>Махалли:</span><strong>{{ report.summary.created_mahallas }}</strong></div>
+      <div class="chip"><span>Улицы:</span><strong>{{ report.summary.created_streets }}</strong></div>
+      <div class="chip"><span>Работники:</span><strong>{{ report.summary.created_workers }}</strong></div>
+      <div class="chip"><span>Назначено:</span><strong>{{ report.summary.assigned_workers }}</strong></div>
+      <div class="chip"><span>Пропущено:</span><strong>{{ report.summary.skipped }}</strong></div>
+      <div class="chip"><span>Ошибки:</span><strong>{{ report.summary.errors }}</strong></div>
+    </div>
+  </div>
+
+  <div class="card import-log-card">
+    <div class="row-between">
+      <h2>Лог по строкам</h2>
+      <div class="muted small">Показано: <span id="importShownCount">{{ problem_counts.all }}</span> / {{ problem_counts.all }}</div>
+    </div>
+
+    <div class="import-log-tools">
+      <div class="import-log-filters" role="group" aria-label="Фильтр строк импорта">
+        <button type="button" class="btn import-filter-btn active" data-import-filter="all">Все ({{ problem_counts.all }})</button>
+        <button type="button" class="btn import-filter-btn" data-import-filter="problems">Проблемы ({{ problem_counts.problems }})</button>
+        <button type="button" class="btn import-filter-btn" data-import-filter="success">Успешно ({{ problem_counts.success }})</button>
+      </div>
+
+      {% if has_problems and problem_export_token %}
+        <a class="btn" href="{{ url_for('admin.import_export_problems', token=problem_export_token) }}">Экспорт проблем (XLSX)</a>
+      {% else %}
+        <span class="muted small">Нет проблемных строк для экспорта</span>
+      {% endif %}
+    </div>
+
+    <div class="import-log-wrap">
+      <table class="import-log-table" id="importLogTable">
+        <thead>
+          <tr>
+            <th>Строка</th>
+            <th>Махалля</th>
+            <th>Улица</th>
+            <th>ФИО</th>
+            <th>Статус</th>
+            <th>Комментарий</th>
+            <th>Логин</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in report.rows %}
+            {% set status_class = 'import-status-ok' if row.status == 'CREATED' else ('import-status-skip' if row.status.startswith('SKIP_') else 'import-status-error') %}
+            <tr data-status="{{ row.status }}" data-import-row="1">
+              <td>{{ row.row_number }}</td>
+              <td>{{ row.mahalla }}</td>
+              <td>{{ row.street }}</td>
+              <td>{{ row.fio }}</td>
+              <td><span class="import-status {{ status_class }}">{{ row.status }}</span></td>
+              <td>{{ row.comment }}</td>
+              <td>{{ row.login }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div id="importFilterEmpty" class="muted small hidden">По выбранному фильтру строк нет.</div>
+  </div>
+
+  <script>
+    (function () {
+      const rows = Array.from(document.querySelectorAll('#importLogTable tbody tr[data-import-row]'));
+      const buttons = Array.from(document.querySelectorAll('[data-import-filter]'));
+      const shownEl = document.getElementById('importShownCount');
+      const emptyEl = document.getElementById('importFilterEmpty');
+      if (rows.length === 0 || buttons.length === 0) return;
+
+      function isVisibleForMode(status, mode) {
+        if (mode === 'all') return true;
+        if (mode === 'success') return status === 'CREATED';
+        return status !== 'CREATED';
+      }
+
+      function applyFilter(mode) {
+        let shown = 0;
+        rows.forEach((row) => {
+          const status = row.getAttribute('data-status') || '';
+          const visible = isVisibleForMode(status, mode);
+          row.classList.toggle('hidden', !visible);
+          if (visible) shown += 1;
+        });
+
+        buttons.forEach((btn) => {
+          btn.classList.toggle('active', btn.getAttribute('data-import-filter') === mode);
+        });
+
+        if (shownEl) shownEl.textContent = String(shown);
+        if (emptyEl) emptyEl.classList.toggle('hidden', shown > 0);
+      }
+
+      buttons.forEach((btn) => {
+        btn.addEventListener('click', () => applyFilter(btn.getAttribute('data-import-filter') || 'all'));
+      });
+
+      applyFilter('all');
+    })();
+  </script>
+{% endif %}
+{% endblock %}
