@@ -67,7 +67,27 @@
 
     <div class="row">
       <button id="taskSubmit" class="btn primary" type="submit">Отправить</button>
-      <button class="btn" type="button" onclick="toggleCompose(false)">Закрыть</button>
+      <button id="composeCloseBtn" class="btn" type="button" onclick="toggleCompose(false)">Закрыть</button>
+    </div>
+
+    <div id="jobPanel" class="task-job hidden">
+      <div class="task-job-head row-between">
+        <div>
+          <div class="strong" id="jobStatusText">Задача в очереди</div>
+          <div class="muted small" id="jobStageText">Подготовка</div>
+        </div>
+        <div class="task-job-percent" id="jobPercent">0%</div>
+      </div>
+      <div class="task-job-bar">
+        <div id="jobProgressBar" class="task-job-bar-fill" style="width:0%;"></div>
+      </div>
+      <div class="task-job-stats muted small" id="jobStatsText">Обработано: 0/0 · Отправлено: 0 · Ошибки: 0</div>
+      <div id="jobErrorText" class="task-job-error hidden"></div>
+      <div class="row task-job-actions">
+        <button id="jobRetryBtn" type="button" class="btn hidden">Повторить неуспешные</button>
+        <button id="jobRefreshBtn" type="button" class="btn hidden">Обновить статус</button>
+        <button id="jobReloadBtn" type="button" class="btn hidden">Обновить список задач</button>
+      </div>
     </div>
   </form>
 </div>
@@ -109,7 +129,31 @@
   const rcptCountEl = document.getElementById('rcptCount');
   const rcptHintEl = document.getElementById('rcptHint');
   const submitBtn = document.getElementById('taskSubmit');
+  const composeCloseBtn = document.getElementById('composeCloseBtn');
   const form = document.getElementById('taskForm');
+  const jobPanel = document.getElementById('jobPanel');
+  const jobStatusText = document.getElementById('jobStatusText');
+  const jobStageText = document.getElementById('jobStageText');
+  const jobPercent = document.getElementById('jobPercent');
+  const jobProgressBar = document.getElementById('jobProgressBar');
+  const jobStatsText = document.getElementById('jobStatsText');
+  const jobErrorText = document.getElementById('jobErrorText');
+  const jobRetryBtn = document.getElementById('jobRetryBtn');
+  const jobRefreshBtn = document.getElementById('jobRefreshBtn');
+  const jobReloadBtn = document.getElementById('jobReloadBtn');
+
+  const POLL_INTERVAL_MS = 1500;
+  const POLL_ERROR_LIMIT = 20;
+  const FINAL_STATUSES = new Set(['succeeded', 'partial', 'failed']);
+  const STAGE_LABELS = {
+    preparing: 'Подготовка',
+    sending: 'Отправка',
+    finalizing: 'Завершение'
+  };
+
+  let activeJobId = null;
+  let pollTimer = null;
+  let pollErrors = 0;
 
   const TOTAL_ALL = {{ total_all|int }};
   const DISTRICTS = {{ districts_json|safe }};
@@ -145,6 +189,153 @@
     mahallas: new Set(),
     streets: new Set()
   };
+
+  function resetJobPanel() {
+    activeJobId = null;
+    pollErrors = 0;
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    jobPanel.classList.add('hidden');
+    jobStatusText.textContent = 'Задача в очереди';
+    jobStageText.textContent = 'Подготовка';
+    jobPercent.textContent = '0%';
+    jobProgressBar.style.width = '0%';
+    jobStatsText.textContent = 'Обработано: 0/0 · Отправлено: 0 · Ошибки: 0';
+    jobErrorText.textContent = '';
+    jobErrorText.classList.add('hidden');
+    jobRetryBtn.classList.add('hidden');
+    jobRefreshBtn.classList.add('hidden');
+    jobReloadBtn.classList.add('hidden');
+  }
+
+  function lockForm(locked) {
+    form.querySelectorAll('input, textarea, select, button').forEach((el) => {
+      if (el === composeCloseBtn) return;
+      el.disabled = locked;
+    });
+    submitBtn.classList.toggle('disabled', locked);
+  }
+
+  function normalizeStatus(status) {
+    switch (status) {
+      case 'queued':
+        return 'В очереди';
+      case 'running':
+        return 'Выполняется';
+      case 'succeeded':
+        return 'Успешно завершено';
+      case 'partial':
+        return 'Завершено с ошибками';
+      case 'failed':
+        return 'Ошибка выполнения';
+      default:
+        return status || 'Неизвестно';
+    }
+  }
+
+  function renderJob(payload) {
+    const total = Number(payload.total || 0);
+    const processed = Number(payload.processed || 0);
+    const sent = Number(payload.sent || 0);
+    const failed = Number(payload.failed || 0);
+    const percent = Math.max(0, Math.min(100, Number(payload.progress_percent || 0)));
+
+    jobPanel.classList.remove('hidden');
+    jobStatusText.textContent = normalizeStatus(payload.status);
+    jobStageText.textContent = STAGE_LABELS[payload.stage] || payload.stage || 'Обработка';
+    jobPercent.textContent = `${percent}%`;
+    jobProgressBar.style.width = `${percent}%`;
+    jobStatsText.textContent = `Обработано: ${processed}/${total} · Отправлено: ${sent} · Ошибки: ${failed}`;
+
+    if (payload.error_message) {
+      jobErrorText.textContent = payload.error_message;
+      jobErrorText.classList.remove('hidden');
+    } else {
+      jobErrorText.textContent = '';
+      jobErrorText.classList.add('hidden');
+    }
+
+    const isFinal = FINAL_STATUSES.has(payload.status);
+    jobRetryBtn.classList.toggle('hidden', !(isFinal && failed > 0));
+    jobReloadBtn.classList.toggle('hidden', !isFinal);
+
+    if (isFinal) {
+      lockForm(false);
+      stopPolling();
+    }
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  async function fetchJobStatus() {
+    if (!activeJobId) return;
+    try {
+      const r = await fetch(`/manager/tasks/jobs/${activeJobId}`, {
+        headers: {
+          Accept: 'application/json',
+          'X-Requested-With': 'XMLHttpRequest'
+        },
+        cache: 'no-store'
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) {
+        throw new Error(data.message || 'Не удалось получить статус');
+      }
+      pollErrors = 0;
+      jobRefreshBtn.classList.add('hidden');
+      renderJob(data);
+    } catch (err) {
+      pollErrors += 1;
+      if (pollErrors >= POLL_ERROR_LIMIT) {
+        stopPolling();
+        jobRefreshBtn.classList.remove('hidden');
+        jobErrorText.textContent = 'Связь потеряна. Нажмите "Обновить статус".';
+        jobErrorText.classList.remove('hidden');
+      }
+    }
+  }
+
+  function startPolling(jobId) {
+    activeJobId = jobId;
+    pollErrors = 0;
+    stopPolling();
+    fetchJobStatus();
+    pollTimer = setInterval(fetchJobStatus, POLL_INTERVAL_MS);
+  }
+
+  async function startRetryFailed() {
+    if (!activeJobId) return;
+    jobRetryBtn.disabled = true;
+    try {
+      const r = await fetch(`/manager/tasks/jobs/${activeJobId}/retry-failed`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'X-Requested-With': 'XMLHttpRequest'
+        }
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok || !data.retry_job_id) {
+        throw new Error(data.message || 'Не удалось запустить повторную отправку');
+      }
+      lockForm(true);
+      jobErrorText.classList.add('hidden');
+      jobRetryBtn.classList.add('hidden');
+      startPolling(data.retry_job_id);
+    } catch (err) {
+      jobErrorText.textContent = err.message || 'Ошибка повторной отправки';
+      jobErrorText.classList.remove('hidden');
+    } finally {
+      jobRetryBtn.disabled = false;
+    }
+  }
 
   function currentMode() {
     return document.querySelector('input[name="mode"]:checked')?.value || 'all';
@@ -362,7 +553,15 @@
     if (v) {
       setModeUi(currentMode());
       updateRecipients();
+      if (activeJobId) {
+        jobPanel.classList.remove('hidden');
+      }
+      return;
     }
+
+    lockForm(false);
+    stopPolling();
+    resetJobPanel();
   }
 
   document.querySelectorAll('input[name="mode"]').forEach((r) => {
@@ -408,13 +607,66 @@
     updateRecipients();
   });
 
-  form.addEventListener('submit', (e) => {
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+
     const mode = currentMode();
     if (mode !== 'all' && selectedIds(mode).length === 0) {
-      e.preventDefault();
       alert(MODE_META[mode].emptyAlert);
       return;
     }
+
+    lockForm(true);
+    jobPanel.classList.remove('hidden');
+    jobStatusText.textContent = 'В очереди';
+    jobStageText.textContent = 'Подготовка';
+    jobPercent.textContent = '0%';
+    jobProgressBar.style.width = '0%';
+    jobStatsText.textContent = `Обработано: 0/${rcptCountEl.textContent || 0} · Отправлено: 0 · Ошибки: 0`;
+    jobErrorText.textContent = '';
+    jobErrorText.classList.add('hidden');
+    jobRetryBtn.classList.add('hidden');
+    jobReloadBtn.classList.add('hidden');
+    jobRefreshBtn.classList.add('hidden');
+
+    try {
+      const resp = await fetch(form.action, {
+        method: 'POST',
+        body: new FormData(form),
+        headers: {
+          Accept: 'application/json',
+          'X-Requested-With': 'XMLHttpRequest'
+        }
+      });
+
+      const data = await resp.json();
+      if (!resp.ok || !data.ok || !data.job_id) {
+        throw new Error(data.message || 'Не удалось запустить отправку');
+      }
+
+      startPolling(data.job_id);
+    } catch (err) {
+      lockForm(false);
+      jobErrorText.textContent = err.message || 'Ошибка отправки задачи';
+      jobErrorText.classList.remove('hidden');
+      jobRefreshBtn.classList.remove('hidden');
+    }
+  });
+
+  jobRetryBtn?.addEventListener('click', () => {
+    startRetryFailed();
+  });
+
+  jobRefreshBtn?.addEventListener('click', () => {
+    pollErrors = 0;
+    jobRefreshBtn.classList.add('hidden');
+    if (activeJobId) {
+      startPolling(activeJobId);
+    }
+  });
+
+  jobReloadBtn?.addEventListener('click', () => {
+    window.location.reload();
   });
 
   function setupTaskFilePicker() {
@@ -430,6 +682,7 @@
     setupTaskFilePicker();
   }
 
+  resetJobPanel();
   setModeUi(currentMode());
   updateRecipients();
 

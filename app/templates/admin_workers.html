@@ -8,9 +8,12 @@
   <div class="card">
     <h2>Создать работника</h2>
 
-    {% if free_streets|length == 0 %}
+    {% if free_streets_total == 0 %}
       <div class="muted">Нет свободных улиц. Сначала добавьте улицы в структуру.</div>
     {% else %}
+      {% if free_streets_total > free_streets|length %}
+        <div class="muted small">Показаны первые {{ free_streets|length }} из {{ free_streets_total }} свободных улиц. Используйте поиск/фильтры в структуре, если нужной улицы нет в списке.</div>
+      {% endif %}
     <form method="post" action="{{ url_for('admin.worker_create') }}" class="stack">
       <select name="street_id" required>
         <option value="">Выберите свободную улицу</option>
@@ -40,10 +43,25 @@
     <div class="row-between">
       <h2>Список</h2>
       <form method="get" class="row">
+        <input type="hidden" name="per_page" value="{{ per_page }}">
         <input name="q" value="{{ q or '' }}" placeholder="Поиск по ФИО">
         <button class="btn" type="submit">Найти</button>
       </form>
     </div>
+
+    <div class="row-between">
+      <div class="muted small">Показано {{ workers|length }} из {{ workers_page.total }}</div>
+      <form method="get" class="row">
+        <input type="hidden" name="q" value="{{ q or '' }}">
+        <label class="muted small" for="per-page-select">На странице:</label>
+        <select id="per-page-select" name="per_page" onchange="this.form.submit()">
+          {% for n in [50, 100, 150, 200] %}
+            <option value="{{ n }}" {{ 'selected' if per_page == n else '' }}>{{ n }}</option>
+          {% endfor %}
+        </select>
+      </form>
+    </div>
+
     <div class="list">
       {% for w in workers %}
         <div class="item cardmini">
@@ -84,6 +102,20 @@
         <div class="muted">Работников нет</div>
       {% endfor %}
     </div>
+
+    {% if workers_page.pages > 1 %}
+      <div class="row-between">
+        <div class="row">
+          {% if workers_page.has_prev %}
+            <a class="btn" href="{{ url_for('admin.workers', q=q, page=workers_page.prev_num, per_page=per_page) }}">Назад</a>
+          {% endif %}
+          {% if workers_page.has_next %}
+            <a class="btn" href="{{ url_for('admin.workers', q=q, page=workers_page.next_num, per_page=per_page) }}">Вперёд</a>
+          {% endif %}
+        </div>
+        <div class="muted small">Страница {{ workers_page.page }} / {{ workers_page.pages }}</div>
+      </div>
+    {% endif %}
   </div>
 </div>
 {% endblock %}

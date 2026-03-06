@@ -1,10 +1,15 @@
 from datetime import datetime
-from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify, make_response
-from flask_login import login_required, current_user
+
+from flask import Blueprint, flash, jsonify, make_response, redirect, render_template, request, url_for
+from flask_login import current_user, login_required
+from sqlalchemy import and_, case, func, or_
+from sqlalchemy.orm import aliased
+
 from . import db
-from .models import User, WorkerAssignment, Street, Mahalla, District, Conversation, Message, TaskBatch, TaskBatchRecipient, ConversationMember
-from .utils import require_role, get_or_create_conversation, save_files, update_last_read
+from .models import Conversation, ConversationMember, District, Mahalla, Message, Street, TaskBatch, TaskBatchRecipient, TaskDispatchJob, User, WorkerAssignment
 from .realtime import notify_conversation
+from .tasks import enqueue_retry_failed, enqueue_task_dispatch, get_job_payload_or_404, job_failures_payload
+from .utils import get_or_create_conversation, require_role, save_files, update_last_read
 
 bp = Blueprint("manager", __name__)
 
@@ -31,37 +36,48 @@ def _parse_int_ids(values):
 
 
 def _task_targets_payload():
-    active_workers = _all_workers_query().all()
-    total_all = len(active_workers)
+    total_all = _all_workers_query().count()
 
-    assignments = {a.worker_id: a for a in WorkerAssignment.query.all()}
     district_rows = District.query.order_by(District.name.asc()).all()
     mahalla_rows = Mahalla.query.order_by(Mahalla.name.asc()).all()
     street_rows = Street.query.order_by(Street.name.asc()).all()
 
+    district_counts = {
+        district_id: count
+        for district_id, count in (
+            db.session.query(Mahalla.district_id, func.count(User.id))
+            .join(Street, Street.mahalla_id == Mahalla.id)
+            .join(WorkerAssignment, WorkerAssignment.street_id == Street.id)
+            .join(User, User.id == WorkerAssignment.worker_id)
+            .filter(User.role == "worker", User.is_active.is_(True))
+            .group_by(Mahalla.district_id)
+            .all()
+        )
+    }
+    mahalla_counts = {
+        mahalla_id: count
+        for mahalla_id, count in (
+            db.session.query(Street.mahalla_id, func.count(User.id))
+            .join(WorkerAssignment, WorkerAssignment.street_id == Street.id)
+            .join(User, User.id == WorkerAssignment.worker_id)
+            .filter(User.role == "worker", User.is_active.is_(True))
+            .group_by(Street.mahalla_id)
+            .all()
+        )
+    }
+    street_counts = {
+        street_id: count
+        for street_id, count in (
+            db.session.query(WorkerAssignment.street_id, func.count(User.id))
+            .join(User, User.id == WorkerAssignment.worker_id)
+            .filter(User.role == "worker", User.is_active.is_(True))
+            .group_by(WorkerAssignment.street_id)
+            .all()
+        )
+    }
+
     district_by_id = {d.id: d for d in district_rows}
     mahalla_by_id = {m.id: m for m in mahalla_rows}
-    street_by_id = {s.id: s for s in street_rows}
-
-    district_counts = {}
-    mahalla_counts = {}
-    street_counts = {}
-
-    for worker in active_workers:
-        a = assignments.get(worker.id)
-        if not a:
-            continue
-        street = street_by_id.get(a.street_id)
-        if not street:
-            continue
-        mahalla = mahalla_by_id.get(street.mahalla_id)
-        if not mahalla:
-            continue
-
-        street_counts[street.id] = street_counts.get(street.id, 0) + 1
-        mahalla_counts[mahalla.id] = mahalla_counts.get(mahalla.id, 0) + 1
-        if mahalla.district_id in district_by_id:
-            district_counts[mahalla.district_id] = district_counts.get(mahalla.district_id, 0) + 1
 
     districts_json = [
         {"id": d.id, "name": d.name, "count": district_counts.get(d.id, 0)}
@@ -96,16 +112,24 @@ def _task_targets_payload():
     return total_all, districts_json, mahallas_json, streets_json
 
 
+
+
+def _wants_json() -> bool:
+    if request.headers.get("X-Requested-With", "").lower() == "xmlhttprequest":
+        return True
+    best = request.accept_mimetypes.best_match(["application/json", "text/html"])
+    return best == "application/json" and request.accept_mimetypes[best] > request.accept_mimetypes["text/html"]
+
 def _worker_ids_for_target(mode: str, target_ids):
     if mode == "all":
-        return [w.id for w in _all_workers_query().all()]
+        return [worker_id for (worker_id,) in _all_workers_query().with_entities(User.id).all()]
 
     workers_q = (
         User.query
         .join(WorkerAssignment, WorkerAssignment.worker_id == User.id)
         .join(Street, WorkerAssignment.street_id == Street.id)
         .join(Mahalla, Street.mahalla_id == Mahalla.id)
-        .filter(User.role == "worker", User.is_active == True)
+        .filter(User.role == "worker", User.is_active.is_(True))
     )
 
     if mode == "districts":
@@ -117,35 +141,72 @@ def _worker_ids_for_target(mode: str, target_ids):
     else:
         return []
 
-    return sorted({w.id for w in workers_q.all()})
+    return [worker_id for (worker_id,) in workers_q.with_entities(User.id).distinct().all()]
 
 @bp.get("/tasks")
 @login_required
 def tasks():
     require_role(current_user, "manager")
-    batches = TaskBatch.query.filter_by(manager_id=_manager_id()).order_by(TaskBatch.created_at.desc()).all()
+    batches = (
+        TaskBatch.query
+        .filter_by(manager_id=_manager_id())
+        .order_by(TaskBatch.created_at.desc())
+        .all()
+    )
 
-    # рассчитать проценты
+    batch_ids = [b.id for b in batches]
+    stats_map = {}
+    if batch_ids:
+        stats_rows = (
+            db.session.query(
+                TaskBatchRecipient.batch_id.label("batch_id"),
+                func.count(TaskBatchRecipient.id).label("total"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                and_(
+                                    ConversationMember.last_read_at.isnot(None),
+                                    ConversationMember.last_read_at >= Message.sent_at,
+                                ),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label("read"),
+            )
+            .join(Message, Message.id == TaskBatchRecipient.message_id)
+            .outerjoin(
+                ConversationMember,
+                and_(
+                    ConversationMember.conversation_id == TaskBatchRecipient.conversation_id,
+                    ConversationMember.user_id == TaskBatchRecipient.worker_id,
+                ),
+            )
+            .filter(TaskBatchRecipient.batch_id.in_(batch_ids))
+            .group_by(TaskBatchRecipient.batch_id)
+            .all()
+        )
+        stats_map = {row.batch_id: (int(row.total or 0), int(row.read or 0)) for row in stats_rows}
+
     data = []
-    for b in batches:
-        recs = TaskBatchRecipient.query.filter_by(batch_id=b.id).all()
-        total = len(recs)
-        read = 0
-        for r in recs:
-            cm = ConversationMember.query.filter_by(conversation_id=r.conversation_id, user_id=r.worker_id).first()
-            if cm and cm.last_read_at >= r.message.sent_at:
-                read += 1
+    for batch in batches:
+        total, read = stats_map.get(batch.id, (0, 0))
         percent = int((read / total) * 100) if total else 0
-        data.append({"batch": b, "total": total, "read": read, "percent": percent})
+        data.append({"batch": batch, "total": total, "read": read, "percent": percent})
 
     total_all, districts_json, mahallas_json, streets_json = _task_targets_payload()
 
-    return render_template("manager_tasks.html",
-                           batches=data,
-                           districts_json=districts_json,
-                           mahallas_json=mahallas_json,
-                           streets_json=streets_json,
-                           total_all=total_all)
+    return render_template(
+        "manager_tasks.html",
+        batches=data,
+        districts_json=districts_json,
+        mahallas_json=mahallas_json,
+        streets_json=streets_json,
+        total_all=total_all,
+    )
 
 
 @bp.post("/tasks/send")
@@ -155,9 +216,11 @@ def send_task():
 
     title = request.form.get("title", "").strip()
     body = request.form.get("body", "").strip()
-    mode = request.form.get("mode", "all").strip()  # all | districts | mahallas | streets
+    mode = request.form.get("mode", "all").strip()
 
     if not title:
+        if _wants_json():
+            return jsonify({"ok": False, "error_code": "title_required", "message": "Название задачи обязательно"}), 400
         flash("Название задачи обязательно", "error")
         return redirect(url_for("manager.tasks"))
 
@@ -173,6 +236,8 @@ def send_task():
     }
 
     if mode != "all" and mode not in mode_to_param:
+        if _wants_json():
+            return jsonify({"ok": False, "error_code": "invalid_mode", "message": "Неверный режим отправки"}), 400
         flash("Неверный режим отправки", "error")
         return redirect(url_for("manager.tasks"))
 
@@ -180,191 +245,305 @@ def send_task():
     if mode in mode_to_param:
         target_ids = _parse_int_ids(request.form.getlist(mode_to_param[mode]))
         if not target_ids:
+            if _wants_json():
+                return jsonify({"ok": False, "error_code": "target_required", "message": mode_to_error[mode]}), 400
             flash(mode_to_error[mode], "error")
             return redirect(url_for("manager.tasks"))
 
     worker_ids = _worker_ids_for_target(mode, target_ids)
     if not worker_ids:
+        if _wants_json():
+            return jsonify({"ok": False, "error_code": "no_recipients", "message": "Нет работников для выбранной группы"}), 400
         flash("Нет работников для выбранной группы", "error")
         return redirect(url_for("manager.tasks"))
 
-
-    # batch create
-    batch = TaskBatch(manager_id=_manager_id(), title=title, body=body)
-    db.session.add(batch)
-    db.session.flush()
-
-    # attachments: input name="attachments" multiple
     files = request.files.getlist("attachments")
 
-    notify_items = []
-    for wid in worker_ids:
-        worker = User.query.filter_by(id=wid, role="worker", is_active=True).first()
-        if not worker:
-            continue
-
-        conv = get_or_create_conversation(_manager_id(), worker.id)
-        msg = Message(
-            conversation_id=conv.id,
-            sender_id=_manager_id(),
-            type="task",
+    try:
+        job = enqueue_task_dispatch(
+            manager_id=_manager_id(),
             title=title,
             body=body,
-            sent_at=datetime.utcnow(),
+            mode=mode,
+            target_ids=target_ids,
+            worker_ids=worker_ids,
+            files=files,
         )
-        db.session.add(msg)
-        db.session.flush()
+    except Exception as exc:
+        if _wants_json():
+            return jsonify({"ok": False, "error_code": "queue_error", "message": str(exc)}), 500
+        flash(f"Не удалось поставить задачу в очередь: {exc}", "error")
+        return redirect(url_for("manager.tasks"))
 
-        # save attachments for this message (копия ссылок на те же файлы нам ок? для простоты: сохраняем один раз на message)
-        if files:
-            # ВАЖНО: FileStorage нельзя переиспользовать после save() для нескольких получателей.
-            # Поэтому: сохраняем вложения только для первого получателя? НЕЛЬЗЯ — работник должен видеть.
-            # Решение для MVP: сохраняем файлы в память bytes и пишем заново.
-            # Сделаем простое: читаем bytes один раз и пишем для каждого.
-            re_files = []
-            for f in files:
-                if not f or not f.filename:
-                    continue
-                re_files.append((f.filename, f.mimetype, f.read()))
-                f.stream.seek(0)
-            # сохранить байты для каждого получателя
-            from werkzeug.datastructures import FileStorage
-            import io
-            rebuilt = []
-            for (fname, mime, bts) in re_files:
-                rebuilt.append(FileStorage(stream=io.BytesIO(bts), filename=fname, content_type=mime))
-            save_files(rebuilt, msg.id)
+    payload = {
+        "ok": True,
+        "job_id": job.id,
+        "status": job.status,
+        "total_workers": job.total_workers,
+        "message": "Задача поставлена в очередь",
+    }
 
-        # update conversation last_message_at
-        conv.last_message_at = datetime.utcnow()
-        db.session.add(conv)
+    if _wants_json():
+        return jsonify(payload), 202
 
-        db.session.add(TaskBatchRecipient(
-            batch_id=batch.id,
-            worker_id=worker.id,
-            conversation_id=conv.id,
-            message_id=msg.id
-        ))
-        notify_items.append((conv.id, msg.id))
-
-    db.session.commit()
-    for conv_id, msg_id in notify_items:
-        notify_conversation(conv_id, {"type": "new_message", "conversation_id": conv_id, "message_id": msg_id})
-    flash("Задача отправлена", "ok")
+    flash("Задача поставлена в очередь", "ok")
     return redirect(url_for("manager.tasks"))
+
+
+@bp.get("/tasks/jobs/<job_id>")
+@login_required
+def task_job_status(job_id: str):
+    require_role(current_user, "manager")
+    payload = get_job_payload_or_404(job_id, _manager_id())
+    if not payload:
+        return jsonify({"ok": False, "error_code": "not_found", "message": "Задача не найдена"}), 404
+    payload["ok"] = True
+    return jsonify(payload)
+
+
+@bp.get("/tasks/jobs/<job_id>/failures")
+@login_required
+def task_job_failures(job_id: str):
+    require_role(current_user, "manager")
+    job = TaskDispatchJob.query.filter_by(id=job_id, manager_id=_manager_id()).first_or_404()
+    page = request.args.get("page", default=1, type=int)
+    per_page = request.args.get("per_page", default=50, type=int)
+    payload = job_failures_payload(job, page=page, per_page=per_page)
+    payload["ok"] = True
+    payload["job_id"] = job.id
+    return jsonify(payload)
+
+
+@bp.post("/tasks/jobs/<job_id>/retry-failed")
+@login_required
+def task_job_retry_failed(job_id: str):
+    require_role(current_user, "manager")
+    source_job = TaskDispatchJob.query.filter_by(id=job_id, manager_id=_manager_id()).first_or_404()
+
+    retry_job = enqueue_retry_failed(source_job=source_job, manager_id=_manager_id())
+    if not retry_job:
+        return jsonify({"ok": False, "error_code": "nothing_to_retry", "message": "Нет неуспешных получателей"}), 400
+
+    return jsonify({"ok": True, "retry_job_id": retry_job.id, "status": retry_job.status}), 202
+
 
 @bp.get("/tasks/details/<int:batch_id>")
 @login_required
 def task_details(batch_id: int):
     require_role(current_user, "manager")
     batch = TaskBatch.query.filter_by(id=batch_id, manager_id=_manager_id()).first_or_404()
-    recs = TaskBatchRecipient.query.filter_by(batch_id=batch.id).all()
 
-    # build structure map for analytics
-    # worker -> street -> mahalla -> district
-    assign = {a.worker_id: a for a in WorkerAssignment.query.all()}
-    streets = {s.id: s for s in Street.query.all()}
-    mahallas = {m.id: m for m in Mahalla.query.all()}
-    districts = {d.id: d for d in District.query.all()}
+    rows = (
+        db.session.query(
+            TaskBatchRecipient.worker_id.label("worker_id"),
+            User.last_name.label("last_name"),
+            User.first_name.label("first_name"),
+            User.middle_name.label("middle_name"),
+            District.name.label("district_name"),
+            Mahalla.name.label("mahalla_name"),
+            Street.name.label("street_name"),
+            Message.sent_at.label("sent_at"),
+            ConversationMember.last_read_at.label("last_read_at"),
+        )
+        .join(User, User.id == TaskBatchRecipient.worker_id)
+        .join(Message, Message.id == TaskBatchRecipient.message_id)
+        .outerjoin(WorkerAssignment, WorkerAssignment.worker_id == TaskBatchRecipient.worker_id)
+        .outerjoin(Street, Street.id == WorkerAssignment.street_id)
+        .outerjoin(Mahalla, Mahalla.id == Street.mahalla_id)
+        .outerjoin(District, District.id == Mahalla.district_id)
+        .outerjoin(
+            ConversationMember,
+            and_(
+                ConversationMember.conversation_id == TaskBatchRecipient.conversation_id,
+                ConversationMember.user_id == TaskBatchRecipient.worker_id,
+            ),
+        )
+        .filter(TaskBatchRecipient.batch_id == batch.id)
+        .all()
+    )
 
     tree = {}
-    for r in recs:
-        a = assign.get(r.worker_id)
-        street = streets.get(a.street_id) if a else None
-        mahalla = mahallas.get(street.mahalla_id) if street else None
-        district = districts.get(mahalla.district_id) if mahalla else None
+    for row in rows:
+        district_name = row.district_name or "Без района"
+        mahalla_name = row.mahalla_name or "Без махалли"
+        street_name = row.street_name or "Без улицы"
+        is_read = bool(row.last_read_at and row.sent_at and row.last_read_at >= row.sent_at)
 
-        dname = district.name if district else "Без района"
-        mname = mahalla.name if mahalla else "Без махалли"
-        sname = street.name if street else "Без улицы"
+        worker_name = " ".join(
+            value for value in [row.last_name, row.first_name, row.middle_name] if value
+        ).strip() or f"Worker #{row.worker_id}"
 
-        cm = ConversationMember.query.filter_by(conversation_id=r.conversation_id, user_id=r.worker_id).first()
-        is_read = bool(cm and cm.last_read_at >= r.message.sent_at)
+        tree.setdefault(district_name, {"_total": 0, "_read": 0, "mahallas": {}})
+        tree[district_name]["_total"] += 1
+        tree[district_name]["_read"] += 1 if is_read else 0
 
-        tree.setdefault(dname, {"_total": 0, "_read": 0, "mahallas": {}})
-        tree[dname]["_total"] += 1
-        tree[dname]["_read"] += 1 if is_read else 0
+        tree[district_name]["mahallas"].setdefault(mahalla_name, {"_total": 0, "_read": 0, "streets": {}})
+        tree[district_name]["mahallas"][mahalla_name]["_total"] += 1
+        tree[district_name]["mahallas"][mahalla_name]["_read"] += 1 if is_read else 0
 
-        tree[dname]["mahallas"].setdefault(mname, {"_total": 0, "_read": 0, "streets": {}})
-        tree[dname]["mahallas"][mname]["_total"] += 1
-        tree[dname]["mahallas"][mname]["_read"] += 1 if is_read else 0
+        tree[district_name]["mahallas"][mahalla_name]["streets"].setdefault(
+            street_name,
+            {"_total": 0, "_read": 0, "workers": []},
+        )
+        tree[district_name]["mahallas"][mahalla_name]["streets"][street_name]["_total"] += 1
+        tree[district_name]["mahallas"][mahalla_name]["streets"][street_name]["_read"] += 1 if is_read else 0
 
-        tree[dname]["mahallas"][mname]["streets"].setdefault(sname, {"_total": 0, "_read": 0, "workers": []})
-        tree[dname]["mahallas"][mname]["streets"][sname]["_total"] += 1
-        tree[dname]["mahallas"][mname]["streets"][sname]["_read"] += 1 if is_read else 0
-
-        tree[dname]["mahallas"][mname]["streets"][sname]["workers"].append({
-            "worker_id": r.worker_id,
-            "worker_name": r.worker.full_name,
-            "read": is_read
-        })
+        tree[district_name]["mahallas"][mahalla_name]["streets"][street_name]["workers"].append(
+            {
+                "worker_id": row.worker_id,
+                "worker_name": worker_name,
+                "read": is_read,
+            }
+        )
 
     return jsonify({
         "batch": {"id": batch.id, "title": batch.title, "created_at": batch.created_at.isoformat()},
-        "tree": tree
+        "tree": tree,
     })
+
 
 @bp.get("/chats")
 @login_required
 def chats():
     require_role(current_user, "manager")
 
-    # filters
     district_id = request.args.get("district_id", type=int)
     mahalla_id = request.args.get("mahalla_id", type=int)
+    page = request.args.get("page", default=1, type=int)
+    per_page = request.args.get("per_page", default=50, type=int)
+    per_page = max(20, min(per_page, 100))
 
-    # all conversations with this manager
-    qs = Conversation.query.filter_by(manager_id=_manager_id()).order_by(Conversation.last_message_at.desc())
-    convs = qs.all()
+    conv_q = Conversation.query.filter(Conversation.manager_id == _manager_id())
 
-    # attach worker structure for filtering
-    assign = {a.worker_id: a for a in WorkerAssignment.query.all()}
-    streets = {s.id: s for s in Street.query.all()}
-    mahallas = {m.id: m for m in Mahalla.query.all()}
-    districts = {d.id: d for d in District.query.all()}
+    if district_id or mahalla_id:
+        conv_q = (
+            conv_q
+            .join(WorkerAssignment, WorkerAssignment.worker_id == Conversation.worker_id)
+            .join(Street, Street.id == WorkerAssignment.street_id)
+            .join(Mahalla, Mahalla.id == Street.mahalla_id)
+        )
+        if district_id:
+            conv_q = conv_q.filter(Mahalla.district_id == district_id)
+        if mahalla_id:
+            conv_q = conv_q.filter(Street.mahalla_id == mahalla_id)
 
-    filtered = []
-    for c in convs:
-        a = assign.get(c.worker_id)
-        street = streets.get(a.street_id) if a else None
-        mah = mahallas.get(street.mahalla_id) if street else None
-        dist = districts.get(mah.district_id) if mah else None
+    conv_page = conv_q.order_by(Conversation.last_message_at.desc()).paginate(
+        page=page,
+        per_page=per_page,
+        error_out=False,
+    )
+    convs = conv_page.items
 
-        if district_id and (not dist or dist.id != district_id):
+    conv_ids = [c.id for c in convs]
+    worker_ids = [c.worker_id for c in convs]
+
+    workers_by_id = {}
+    assign_by_worker = {}
+    streets_by_id = {}
+    mahallas_by_id = {}
+    districts_by_id = {}
+    unread_by_conv = {}
+    last_msg_by_conv = {}
+
+    if worker_ids:
+        workers_by_id = {
+            worker.id: worker
+            for worker in User.query.filter(User.id.in_(worker_ids)).all()
+        }
+
+        assignments = WorkerAssignment.query.filter(WorkerAssignment.worker_id.in_(worker_ids)).all()
+        assign_by_worker = {assignment.worker_id: assignment for assignment in assignments}
+
+        street_ids = sorted({assignment.street_id for assignment in assignments})
+        if street_ids:
+            street_rows = Street.query.filter(Street.id.in_(street_ids)).all()
+            streets_by_id = {street.id: street for street in street_rows}
+
+            mahalla_ids = sorted({street.mahalla_id for street in street_rows})
+            if mahalla_ids:
+                mahalla_rows = Mahalla.query.filter(Mahalla.id.in_(mahalla_ids)).all()
+                mahallas_by_id = {mahalla.id: mahalla for mahalla in mahalla_rows}
+
+                district_ids = sorted({mahalla.district_id for mahalla in mahalla_rows})
+                if district_ids:
+                    district_rows = District.query.filter(District.id.in_(district_ids)).all()
+                    districts_by_id = {district.id: district for district in district_rows}
+
+    if conv_ids:
+        cm_alias = aliased(ConversationMember)
+        unread_rows = (
+            db.session.query(Message.conversation_id, func.count(Message.id))
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .outerjoin(
+                cm_alias,
+                and_(
+                    cm_alias.conversation_id == Message.conversation_id,
+                    cm_alias.user_id == _manager_id(),
+                ),
+            )
+            .filter(Message.conversation_id.in_(conv_ids))
+            .filter(Message.sender_id == Conversation.worker_id)
+            .filter(or_(cm_alias.last_read_at.is_(None), Message.sent_at > cm_alias.last_read_at))
+            .group_by(Message.conversation_id)
+            .all()
+        )
+        unread_by_conv = {conv_id: unread for conv_id, unread in unread_rows}
+
+        last_msg_subq = (
+            db.session.query(
+                Message.conversation_id.label("conversation_id"),
+                func.max(Message.id).label("max_message_id"),
+            )
+            .filter(Message.conversation_id.in_(conv_ids))
+            .group_by(Message.conversation_id)
+            .subquery()
+        )
+        last_messages = (
+            db.session.query(Message)
+            .join(last_msg_subq, Message.id == last_msg_subq.c.max_message_id)
+            .all()
+        )
+        last_msg_by_conv = {msg.conversation_id: msg for msg in last_messages}
+
+    items = []
+    for conv in convs:
+        worker = workers_by_id.get(conv.worker_id)
+        if not worker:
             continue
-        if mahalla_id and (not mah or mah.id != mahalla_id):
-            continue
 
-        # unread count for manager: messages from worker after manager last_read_at
-        cm = ConversationMember.query.filter_by(conversation_id=c.id, user_id=_manager_id()).first()
-        last_read = cm.last_read_at if cm else datetime(1970,1,1)
-        unread = Message.query.filter(
-            Message.conversation_id == c.id,
-            Message.sender_id == c.worker_id,
-            Message.sent_at > last_read
-        ).count()
+        assignment = assign_by_worker.get(conv.worker_id)
+        street = streets_by_id.get(assignment.street_id) if assignment else None
+        mahalla = mahallas_by_id.get(street.mahalla_id) if street else None
+        district = districts_by_id.get(mahalla.district_id) if mahalla else None
 
-        last_msg = Message.query.filter_by(conversation_id=c.id).order_by(Message.sent_at.desc()).first()
-
-        filtered.append({
-            "conv": c,
-            "worker": c.worker,
-            "district": dist.name if dist else "",
-            "mahalla": mah.name if mah else "",
-            "street": street.name if street else "",
-            "unread": unread,
-            "last_msg": last_msg
-        })
+        items.append(
+            {
+                "conv": conv,
+                "worker": worker,
+                "district": district.name if district else "",
+                "mahalla": mahalla.name if mahalla else "",
+                "street": street.name if street else "",
+                "unread": unread_by_conv.get(conv.id, 0),
+                "last_msg": last_msg_by_conv.get(conv.id),
+            }
+        )
 
     all_districts = District.query.order_by(District.name.asc()).all()
-    all_mahallas = Mahalla.query.order_by(Mahalla.name.asc()).all()
+    mahalla_filter_q = Mahalla.query.order_by(Mahalla.name.asc())
+    if district_id:
+        mahalla_filter_q = mahalla_filter_q.filter(Mahalla.district_id == district_id)
+    all_mahallas = mahalla_filter_q.all()
 
-    return render_template("manager_chats.html",
-                           items=filtered,
-                           districts=all_districts,
-                           mahallas=all_mahallas,
-                           district_id=district_id,
-                           mahalla_id=mahalla_id)
+    return render_template(
+        "manager_chats.html",
+        items=items,
+        chats_page=conv_page,
+        per_page=per_page,
+        districts=all_districts,
+        mahallas=all_mahallas,
+        district_id=district_id,
+        mahalla_id=mahalla_id,
+    )
 
 @bp.get("/chat/<int:conversation_id>")
 @login_required
@@ -372,7 +551,6 @@ def chat(conversation_id: int):
     require_role(current_user, "manager")
     conv = Conversation.query.filter_by(id=conversation_id, manager_id=_manager_id()).first_or_404()
     # mark as read for manager
-    from .utils import update_last_read
     update_last_read(conv.id, _manager_id())
     db.session.commit()
     return render_template("chat.html", conv=conv, me=current_user)

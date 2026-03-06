@@ -18,6 +18,7 @@ from flask import (
 )
 from flask_login import current_user, login_required
 from sqlalchemy import func, or_
+from sqlalchemy.orm import joinedload
 from unidecode import unidecode
 
 from . import db
@@ -110,6 +111,51 @@ def _split_fio_for_export(value: str):
     if len(parts) == 1:
         return parts[0], "", ""
     return "", "", ""
+
+def _street_base_and_num(name: str):
+    cleaned = _clean_cell(name)
+    match = re.match(r"^(.*)\s\(([0-9]+)\)$", cleaned)
+    if match:
+        base = _clean_cell(match.group(1))
+        return base, int(match.group(2))
+    return cleaned, None
+
+
+def _normalize_street_base(name: str) -> str:
+    return _clean_cell(name).casefold()
+
+
+def _collect_existing_street_suffix_state(district_id: int):
+    state = {}
+    streets = (
+        Street.query.join(Mahalla, Street.mahalla_id == Mahalla.id)
+        .filter(Mahalla.district_id == district_id)
+        .all()
+    )
+
+    for street in streets:
+        base_name, suffix_num = _street_base_and_num(street.name)
+        base_norm = _normalize_street_base(base_name)
+        key = (street.mahalla_id, base_norm)
+        slot = state.setdefault(key, {"has_plain": False, "max_suffix": 0, "existing_exact_names": set()})
+
+        street_clean = _clean_cell(street.name)
+        slot["existing_exact_names"].add(street_clean.casefold())
+        if suffix_num is None:
+            slot["has_plain"] = True
+        else:
+            slot["max_suffix"] = max(slot["max_suffix"], suffix_num)
+
+    return state
+
+
+def _count_import_street_duplicates(prepared_rows: list[dict]):
+    counts = {}
+    for row in prepared_rows:
+        key = (row["mahalla_key"], row["street_base_norm"])
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
 
 
 def _login_base(last_name: str, first_name: str) -> str:
@@ -244,30 +290,13 @@ def _import_workers_from_file(district: District, uploaded_file):
     mahalla_cache = {
         m.name.casefold(): m for m in Mahalla.query.filter_by(district_id=district.id).all()
     }
-
-    street_cache = {}
-    existing_streets = (
-        Street.query.join(Mahalla, Street.mahalla_id == Mahalla.id)
-        .filter(Mahalla.district_id == district.id)
-        .all()
-    )
-    for street in existing_streets:
-        street_cache[(street.mahalla_id, street.name.casefold())] = street
-
-    occupied_street_ids = {
-        street_id
-        for (street_id,) in (
-            db.session.query(WorkerAssignment.street_id)
-            .join(Street, WorkerAssignment.street_id == Street.id)
-            .join(Mahalla, Street.mahalla_id == Mahalla.id)
-            .filter(Mahalla.district_id == district.id)
-            .all()
-        )
-    }
+    street_state = _collect_existing_street_suffix_state(district.id)
 
     existing_logins = {
         (login or "").casefold() for (login,) in db.session.query(User.login).all()
     }
+
+    prepared_rows = []
 
     for row_number, raw_row in _iter_import_rows(uploaded_file, ext):
         if row_number == 1:
@@ -296,16 +325,16 @@ def _import_workers_from_file(district: District, uploaded_file):
             continue
 
         mahalla_name = _clean_cell(row_values[1] if len(row_values) > 1 else "")
-        street_name = _clean_cell(row_values[2] if len(row_values) > 2 else "")
+        street_name_raw = _clean_cell(row_values[2] if len(row_values) > 2 else "")
         worker_fio = _clean_cell(row_values[3] if len(row_values) > 3 else "")
 
-        if not mahalla_name or not street_name or not worker_fio:
+        if not mahalla_name or not street_name_raw or not worker_fio:
             report["summary"]["errors"] += 1
             report["rows"].append(
                 {
                     "row_number": row_number,
                     "mahalla": mahalla_name,
-                    "street": street_name,
+                    "street": street_name_raw,
                     "fio": worker_fio,
                     "status": "ERROR_MISSING_REQUIRED",
                     "comment": "Нужны значения в столбцах 2, 3 и 4",
@@ -321,7 +350,7 @@ def _import_workers_from_file(district: District, uploaded_file):
                 {
                     "row_number": row_number,
                     "mahalla": mahalla_name,
-                    "street": street_name,
+                    "street": street_name_raw,
                     "fio": worker_fio,
                     "status": "ERROR_BAD_FIO",
                     "comment": "ФИО должно содержать минимум фамилию и имя",
@@ -330,12 +359,46 @@ def _import_workers_from_file(district: District, uploaded_file):
             )
             continue
 
+        street_base, _ = _street_base_and_num(street_name_raw)
+        if not street_base:
+            report["summary"]["errors"] += 1
+            report["rows"].append(
+                {
+                    "row_number": row_number,
+                    "mahalla": mahalla_name,
+                    "street": street_name_raw,
+                    "fio": worker_fio,
+                    "status": "ERROR_MISSING_REQUIRED",
+                    "comment": "Название улицы пустое",
+                    "login": "",
+                }
+            )
+            continue
+
+        prepared_rows.append(
+            {
+                "row_number": row_number,
+                "mahalla_name": mahalla_name,
+                "mahalla_key": mahalla_name.casefold(),
+                "street_base": street_base,
+                "street_base_norm": _normalize_street_base(street_base),
+                "worker_fio": worker_fio,
+                "fio_parts": fio_parts,
+            }
+        )
+
+    import_dup_counts = _count_import_street_duplicates(prepared_rows)
+
+    for item in prepared_rows:
+        row_number = item["row_number"]
+        mahalla_name = item["mahalla_name"]
+        worker_fio = item["worker_fio"]
+
         savepoint = db.session.begin_nested()
         try:
             created_mahalla = False
-            created_street = False
 
-            mahalla_key = mahalla_name.casefold()
+            mahalla_key = item["mahalla_key"]
             mahalla = mahalla_cache.get(mahalla_key)
             if not mahalla:
                 mahalla = Mahalla.query.filter(
@@ -349,37 +412,46 @@ def _import_workers_from_file(district: District, uploaded_file):
                 mahalla_cache[mahalla_key] = mahalla
                 created_mahalla = True
 
-            street_key = (mahalla.id, street_name.casefold())
-            street = street_cache.get(street_key)
-            if not street:
-                street = Street.query.filter(
-                    Street.mahalla_id == mahalla.id,
-                    func.lower(Street.name) == street_name.lower(),
-                ).first()
-            if not street:
-                street = Street(mahalla_id=mahalla.id, name=street_name)
-                db.session.add(street)
-                db.session.flush()
-                street_cache[street_key] = street
-                created_street = True
+            base_name = item["street_base"]
+            base_norm = item["street_base_norm"]
+            state_key = (mahalla.id, base_norm)
+            state = street_state.setdefault(
+                state_key,
+                {"has_plain": False, "max_suffix": 0, "existing_exact_names": set()},
+            )
 
-            if street.id in occupied_street_ids:
-                savepoint.rollback()
-                report["summary"]["skipped"] += 1
-                report["rows"].append(
-                    {
-                        "row_number": row_number,
-                        "mahalla": mahalla_name,
-                        "street": street_name,
-                        "fio": worker_fio,
-                        "status": "SKIP_STREET_OCCUPIED",
-                        "comment": "Улица уже закреплена за работником",
-                        "login": "",
-                    }
-                )
-                continue
+            dup_key = (mahalla_key, base_norm)
+            appears_many_in_import = import_dup_counts.get(dup_key, 0) > 1
+            exists_in_db_or_import = state["has_plain"] or state["max_suffix"] > 0 or bool(state["existing_exact_names"])
+            needs_suffix = appears_many_in_import or exists_in_db_or_import
 
-            last_name, first_name, middle_name = fio_parts
+            suffix_num = None
+            if needs_suffix:
+                suffix_num = max(1, state["max_suffix"] + 1)
+                candidate_name = f"{base_name} ({suffix_num})"
+                while candidate_name.casefold() in state["existing_exact_names"]:
+                    suffix_num += 1
+                    candidate_name = f"{base_name} ({suffix_num})"
+            else:
+                candidate_name = base_name
+                if candidate_name.casefold() in state["existing_exact_names"]:
+                    suffix_num = max(1, state["max_suffix"] + 1)
+                    candidate_name = f"{base_name} ({suffix_num})"
+                    while candidate_name.casefold() in state["existing_exact_names"]:
+                        suffix_num += 1
+                        candidate_name = f"{base_name} ({suffix_num})"
+
+            street = Street(mahalla_id=mahalla.id, name=candidate_name)
+            db.session.add(street)
+            db.session.flush()
+
+            state["existing_exact_names"].add(candidate_name.casefold())
+            if suffix_num is None:
+                state["has_plain"] = True
+            else:
+                state["max_suffix"] = max(state["max_suffix"], suffix_num)
+
+            last_name, first_name, middle_name = item["fio_parts"]
             login_base = _login_base(last_name, first_name)
             login = _next_login(login_base, existing_logins)
 
@@ -398,20 +470,18 @@ def _import_workers_from_file(district: District, uploaded_file):
             db.session.add(WorkerAssignment(street_id=street.id, worker_id=worker.id))
             db.session.flush()
 
-            occupied_street_ids.add(street.id)
             savepoint.commit()
 
             if created_mahalla:
                 report["summary"]["created_mahallas"] += 1
-            if created_street:
-                report["summary"]["created_streets"] += 1
+            report["summary"]["created_streets"] += 1
             report["summary"]["created_workers"] += 1
             report["summary"]["assigned_workers"] += 1
             report["rows"].append(
                 {
                     "row_number": row_number,
                     "mahalla": mahalla_name,
-                    "street": street_name,
+                    "street": candidate_name,
                     "fio": worker_fio,
                     "status": "CREATED",
                     "comment": "Работник создан и закреплен за улицей",
@@ -426,7 +496,7 @@ def _import_workers_from_file(district: District, uploaded_file):
                 {
                     "row_number": row_number,
                     "mahalla": mahalla_name,
-                    "street": street_name,
+                    "street": item["street_base"],
                     "fio": worker_fio,
                     "status": "ERROR_EXCEPTION",
                     "comment": str(exc).strip() or "Ошибка обработки строки",
@@ -441,10 +511,47 @@ def _import_workers_from_file(district: District, uploaded_file):
 @login_required
 def structure():
     require_role(current_user, "admin")
+
+    per_page = request.args.get("per_page", default=50, type=int)
+    per_page = max(20, min(per_page, 100))
+
+    district_page_num = request.args.get("district_page", default=1, type=int)
+    mahalla_page_num = request.args.get("mahalla_page", default=1, type=int)
+    street_page_num = request.args.get("street_page", default=1, type=int)
+
+    districts_page = (
+        District.query
+        .order_by(District.name.asc())
+        .paginate(page=district_page_num, per_page=per_page, error_out=False)
+    )
+    mahallas_page = (
+        Mahalla.query
+        .options(joinedload(Mahalla.district))
+        .order_by(Mahalla.name.asc())
+        .paginate(page=mahalla_page_num, per_page=per_page, error_out=False)
+    )
+    streets_page = (
+        Street.query
+        .options(joinedload(Street.mahalla).joinedload(Mahalla.district))
+        .order_by(Street.name.asc())
+        .paginate(page=street_page_num, per_page=per_page, error_out=False)
+    )
+
     districts = District.query.order_by(District.name.asc()).all()
-    mahallas = Mahalla.query.order_by(Mahalla.name.asc()).all()
-    streets = Street.query.order_by(Street.name.asc()).all()
-    return render_template("admin_structure.html", districts=districts, mahallas=mahallas, streets=streets)
+    mahallas = Mahalla.query.options(joinedload(Mahalla.district)).order_by(Mahalla.name.asc()).all()
+
+    return render_template(
+        "admin_structure.html",
+        districts=districts,
+        mahallas=mahallas,
+        districts_page=districts_page,
+        mahallas_page=mahallas_page,
+        streets_page=streets_page,
+        per_page=per_page,
+        district_page=district_page_num,
+        mahalla_page=mahalla_page_num,
+        street_page=street_page_num,
+    )
 
 
 @bp.get("/import")
@@ -632,6 +739,10 @@ def street_create():
 def workers():
     require_role(current_user, "admin")
     q = request.args.get("q", "").strip()
+    page = request.args.get("page", default=1, type=int)
+    per_page = request.args.get("per_page", default=100, type=int)
+    per_page = max(20, min(per_page, 200))
+
     workers_q = User.query.filter_by(role="worker", is_active=True)
     if q:
         like = f"%{q}%"
@@ -642,25 +753,24 @@ def workers():
             User.login.ilike(like),
             (User.last_name + " " + User.first_name + " " + User.middle_name).ilike(like)
         ))
-    workers = workers_q.order_by(User.last_name.asc()).all()
+    workers_page = workers_q.order_by(User.last_name.asc()).paginate(page=page, per_page=per_page, error_out=False)
+    workers = workers_page.items
 
-    assigned_street_ids = {a.street_id for a in WorkerAssignment.query.all()}
-    free_streets = Street.query.order_by(Street.name.asc()).all()
-    free_streets = [s for s in free_streets if s.id not in assigned_street_ids]
-
-    assignments = WorkerAssignment.query.all()
-    by_worker = {a.worker_id: a for a in assignments}
-
-    districts = District.query.order_by(District.name.asc()).all()
-    mahallas = Mahalla.query.order_by(Mahalla.name.asc()).all()
+    free_streets_query = (
+        Street.query
+        .outerjoin(WorkerAssignment, WorkerAssignment.street_id == Street.id)
+        .filter(WorkerAssignment.id.is_(None))
+    )
+    free_streets_total = free_streets_query.count()
+    free_streets = free_streets_query.order_by(Street.name.asc()).limit(500).all()
 
     return render_template(
         "admin_workers.html",
         workers=workers,
+        workers_page=workers_page,
+        per_page=per_page,
         free_streets=free_streets,
-        by_worker=by_worker,
-        districts=districts,
-        mahallas=mahallas,
+        free_streets_total=free_streets_total,
         q=q,
     )
 

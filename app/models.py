@@ -156,3 +156,48 @@ class TaskBatchRecipient(db.Model):
     __table_args__ = (
         db.UniqueConstraint("batch_id", "worker_id", name="uq_batch_worker"),
     )
+
+
+class TaskDispatchJob(db.Model):
+    __tablename__ = "task_dispatch_jobs"
+
+    id = db.Column(db.String(36), primary_key=True)
+    manager_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    batch_id = db.Column(db.Integer, db.ForeignKey("task_batches.id"), nullable=True)
+    retry_of_job_id = db.Column(db.String(36), db.ForeignKey("task_dispatch_jobs.id"), nullable=True)
+
+    title = db.Column(db.String(200), nullable=False)
+    body = db.Column(db.Text, default="")
+    mode = db.Column(db.String(20), nullable=False, default="all")
+    target_ids_json = db.Column(db.Text, default="[]")
+    worker_ids_json = db.Column(db.Text, default="[]")
+    attachment_manifest_json = db.Column(db.Text, default="[]")
+
+    status = db.Column(db.String(20), nullable=False, default="queued")
+    stage = db.Column(db.String(32), nullable=False, default="preparing")
+    error_message = db.Column(db.Text, default="")
+
+    total_workers = db.Column(db.Integer, nullable=False, default=0)
+    processed_workers = db.Column(db.Integer, nullable=False, default=0)
+    sent_count = db.Column(db.Integer, nullable=False, default=0)
+    failed_count = db.Column(db.Integer, nullable=False, default=0)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    started_at = db.Column(db.DateTime, nullable=True)
+    finished_at = db.Column(db.DateTime, nullable=True)
+
+    manager = db.relationship("User", foreign_keys=[manager_id])
+    batch = db.relationship("TaskBatch")
+
+
+class TaskDispatchFailure(db.Model):
+    __tablename__ = "task_dispatch_failures"
+
+    id = db.Column(db.Integer, primary_key=True)
+    job_id = db.Column(db.String(36), db.ForeignKey("task_dispatch_jobs.id"), nullable=False)
+    worker_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    reason = db.Column(db.String(500), nullable=False, default="")
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    job = db.relationship("TaskDispatchJob", backref=db.backref("failures", lazy=True, cascade="all, delete-orphan"))
+    worker = db.relationship("User")

@@ -16,7 +16,7 @@
     </form>
 
     <div class="list compact">
-      {% for d in districts %}
+      {% for d in districts_page.items %}
         <div class="row-between itemline">
           <div class="title">{{ d.name }}</div>
           <button class="btn smallbtn" type="button" onclick="toggleEdit('district-{{ d.id }}')">Изменить</button>
@@ -37,6 +37,18 @@
         <div class="muted">Пока пусто</div>
       {% endfor %}
     </div>
+
+    {% if districts_page.pages > 1 %}
+      <div class="pager row">
+        {% if districts_page.has_prev %}
+          <a class="btn smallbtn" href="{{ url_for('admin.structure', district_page=districts_page.prev_num, mahalla_page=mahalla_page, street_page=street_page, per_page=per_page) }}">←</a>
+        {% endif %}
+        <span class="muted small">Стр. {{ districts_page.page }} / {{ districts_page.pages }}</span>
+        {% if districts_page.has_next %}
+          <a class="btn smallbtn" href="{{ url_for('admin.structure', district_page=districts_page.next_num, mahalla_page=mahalla_page, street_page=street_page, per_page=per_page) }}">→</a>
+        {% endif %}
+      </div>
+    {% endif %}
   </div>
 
 
@@ -56,7 +68,7 @@
     </form>
 
     <div class="list compact">
-      {% for m in mahallas %}
+      {% for m in mahallas_page.items %}
         <div class="row-between itemline">
           <div class="title">
             {{ m.name }}
@@ -85,6 +97,18 @@
         <div class="muted">Пока пусто</div>
       {% endfor %}
     </div>
+
+    {% if mahallas_page.pages > 1 %}
+      <div class="pager row">
+        {% if mahallas_page.has_prev %}
+          <a class="btn smallbtn" href="{{ url_for('admin.structure', district_page=district_page, mahalla_page=mahallas_page.prev_num, street_page=street_page, per_page=per_page) }}">←</a>
+        {% endif %}
+        <span class="muted small">Стр. {{ mahallas_page.page }} / {{ mahallas_page.pages }}</span>
+        {% if mahallas_page.has_next %}
+          <a class="btn smallbtn" href="{{ url_for('admin.structure', district_page=district_page, mahalla_page=mahallas_page.next_num, street_page=street_page, per_page=per_page) }}">→</a>
+        {% endif %}
+      </div>
+    {% endif %}
   </div>
 
 
@@ -104,7 +128,7 @@
     </form>
 
     <div class="list compact">
-      {% for s in streets %}
+      {% for s in streets_page.items %}
         <div class="row-between itemline">
           <div class="title">
             {{ s.name }}
@@ -135,6 +159,18 @@
         <div class="muted">Пока пусто</div>
       {% endfor %}
     </div>
+
+    {% if streets_page.pages > 1 %}
+      <div class="pager row">
+        {% if streets_page.has_prev %}
+          <a class="btn smallbtn" href="{{ url_for('admin.structure', district_page=district_page, mahalla_page=mahalla_page, street_page=streets_page.prev_num, per_page=per_page) }}">←</a>
+        {% endif %}
+        <span class="muted small">Стр. {{ streets_page.page }} / {{ streets_page.pages }}</span>
+        {% if streets_page.has_next %}
+          <a class="btn smallbtn" href="{{ url_for('admin.structure', district_page=district_page, mahalla_page=mahalla_page, street_page=streets_page.next_num, per_page=per_page) }}">→</a>
+        {% endif %}
+      </div>
+    {% endif %}
   </div>
 
 </div>

@@ -1554,3 +1554,59 @@ body.chat-open .mobile-nav{
     flex:1 1 calc(50% - 6px);
   }
 }
+
+.task-job{
+  margin-top:12px;
+  padding:12px;
+  border:1px solid var(--line);
+  border-radius:14px;
+  background:#f8fafc;
+}
+
+.task-job-head{
+  align-items:flex-start;
+  gap:8px;
+}
+
+.task-job-percent{
+  font-weight:800;
+  color:var(--accent2);
+}
+
+.task-job-bar{
+  height:10px;
+  border-radius:999px;
+  background:#e2e8f0;
+  overflow:hidden;
+  margin-top:8px;
+}
+
+.task-job-bar-fill{
+  height:100%;
+  width:0;
+  border-radius:999px;
+  background:linear-gradient(90deg,var(--accent),var(--accent2));
+  transition:width .25s ease;
+}
+
+.task-job-stats{
+  margin-top:8px;
+}
+
+.task-job-error{
+  margin-top:8px;
+  font-size:13px;
+  color:#b91c1c;
+}
+
+.task-job-actions{
+  margin-top:10px;
+  flex-wrap:wrap;
+  gap:8px;
+}
+
+.pager{
+  margin-top:10px;
+  align-items:center;
+  gap:8px;
+}

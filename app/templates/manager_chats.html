@@ -5,6 +5,8 @@
 </div>
 
 <form class="chat-filters" method="get">
+  <input type="hidden" name="per_page" value="{{ per_page }}">
+
   <div class="chat-filter-field">
     <label for="districtSelect">Район</label>
     <select id="districtSelect" name="district_id">
@@ -28,10 +30,24 @@
   <div class="chat-filter-actions">
     <button class="btn primary smallbtn" type="submit">Применить</button>
     {% if district_id or mahalla_id %}
-      <a class="btn smallbtn" href="{{ url_for('manager.chats') }}">Сброс</a>
+      <a class="btn smallbtn" href="{{ url_for('manager.chats', per_page=per_page) }}">Сброс</a>
     {% endif %}
   </div>
 </form>
+
+<div class="row-between">
+  <div class="muted small">Показано {{ items|length }} из {{ chats_page.total }}</div>
+  <form method="get" class="row">
+    {% if district_id %}<input type="hidden" name="district_id" value="{{ district_id }}">{% endif %}
+    {% if mahalla_id %}<input type="hidden" name="mahalla_id" value="{{ mahalla_id }}">{% endif %}
+    <label class="muted small" for="chats-per-page">На странице:</label>
+    <select id="chats-per-page" name="per_page" onchange="this.form.submit()">
+      {% for n in [20, 50, 100] %}
+        <option value="{{ n }}" {{ 'selected' if per_page == n else '' }}>{{ n }}</option>
+      {% endfor %}
+    </select>
+  </form>
+</div>
 
 <div class="list">
   {% for it in items %}
@@ -48,14 +64,14 @@
         </div>
         <div>
           <div class="strong">{{ it.worker.full_name }}</div>
-        <div class="muted small">{{ it.district }} · {{ it.mahalla }} · {{ it.street }}</div>
-        <div class="small">
-          {% if it.last_msg %}
-            {{ ("[Задача] " if it.last_msg.type=="task" else "") ~ (it.last_msg.title if it.last_msg.type=="task" else it.last_msg.body) }}
-          {% else %}
-            <span class="muted">Нет сообщений</span>
-          {% endif %}
-        </div>
+          <div class="muted small">{{ it.district }} · {{ it.mahalla }} · {{ it.street }}</div>
+          <div class="small">
+            {% if it.last_msg %}
+              {{ ("[Задача] " if it.last_msg.type=="task" else "") ~ (it.last_msg.title if it.last_msg.type=="task" else it.last_msg.body) }}
+            {% else %}
+              <span class="muted">Нет сообщений</span>
+            {% endif %}
+          </div>
         </div>
       </div>
       <div class="chatrow-right">
@@ -71,4 +87,18 @@
     <div class="muted">Чатов пока нет</div>
   {% endfor %}
 </div>
+
+{% if chats_page.pages > 1 %}
+  <div class="row-between">
+    <div class="row">
+      {% if chats_page.has_prev %}
+        <a class="btn" href="{{ url_for('manager.chats', district_id=district_id, mahalla_id=mahalla_id, page=chats_page.prev_num, per_page=per_page) }}">Назад</a>
+      {% endif %}
+      {% if chats_page.has_next %}
+        <a class="btn" href="{{ url_for('manager.chats', district_id=district_id, mahalla_id=mahalla_id, page=chats_page.next_num, per_page=per_page) }}">Вперёд</a>
+      {% endif %}
+    </div>
+    <div class="muted small">Страница {{ chats_page.page }} / {{ chats_page.pages }}</div>
+  </div>
+{% endif %}
 {% endblock %}
